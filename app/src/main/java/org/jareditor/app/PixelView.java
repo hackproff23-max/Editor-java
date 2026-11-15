@@ -18,19 +18,23 @@ public class PixelView extends View {
     boolean fitted, stroke, moved, multi;
     int lx, ly;
     final Paint p = new Paint(), gp = new Paint(), cp = new Paint(), op = new Paint();
+    final ArrayList<Bitmap> undo = new ArrayList<>();
+    final ScaleGestureDetector sg;
+
+    // ---- PNG importada (camada flutuante, encaixada na grade de pixels) ----
     public boolean ovActive;
     public Runnable onOverlay;
     Bitmap ovSrc, ov;
     int ovX, ovY, gx, gy;
-    final ArrayList<Bitmap> undo = new ArrayList<>();
-    final ScaleGestureDetector sg;
 
     public PixelView(Context c, Bitmap b) {
         super(c);
         bmp = b;
         gp.setColor(0x66000000); p.setFilterBitmap(false); p.setAntiAlias(false); p.setDither(false);
         gp.setStrokeWidth(0);
-        op.setStyle(Paint.Style.STROKE); op.setColor(0xFFFFFF00); op.setStrokeWidth(3);
+        op.setStyle(Paint.Style.STROKE);
+        op.setColor(0xFFFFFF00);
+        op.setStrokeWidth(3);
         Bitmap ck = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888);
         Canvas cc = new Canvas(ck);
         cc.drawColor(0xFFBBBBBB);
