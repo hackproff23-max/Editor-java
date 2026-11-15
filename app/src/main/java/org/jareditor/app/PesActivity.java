@@ -31,6 +31,9 @@ import java.util.zip.*;
  * (segurar na tabela) vale mais e fica guardada para esse .jar.
  * Nas tabelas de tamanho livre, o nome maior usa primeiro o espaco vazio (zeros) depois da tabela,
  * mantendo o resto do arquivo no mesmo lugar. So desloca o arquivo se voce confirmar.
+ *
+ * Botao "Por time": agrupa os nomes de uma tabela em blocos de N jogadores (N = jogadores por time),
+ * com um cabecalho e um espaco entre cada time. O nome do time vem da tabela de Times (mesma posicao).
  */
 public class PesActivity extends Activity {
     static final int REQ_OPEN = 11, REQ_SAVE = 12;
@@ -59,6 +62,8 @@ public class PesActivity extends Activity {
     EditText search;
     Table cur;
     boolean sorted, inEntries, pickDefault;
+    boolean grouped;       // agrupar por time (cabecalho + espaco entre os times)
+    int teamSize = 23;     // jogadores por time
     String filterCat = null; // null = todas as categorias
 
     @Override protected void onCreate(Bundle b) {
@@ -95,8 +100,11 @@ public class PesActivity extends Activity {
         Button back = new Button(this); back.setText("Voltar");
         final Button srt = new Button(this); srt.setText("Ordem A–Z");
         final Button enc = new Button(this); enc.setText("UTF-8");
+        final Button grp = new Button(this); grp.setText("Por time");
+        grp.setAllCaps(false);
         r2.addView(back, new LinearLayout.LayoutParams(0, -2, 1));
         r2.addView(srt, new LinearLayout.LayoutParams(0, -2, 1));
+        r2.addView(grp, new LinearLayout.LayoutParams(0, -2, 1));
         r2.addView(enc, new LinearLayout.LayoutParams(0, -2, 1));
         entRoot.addView(r2);
         entInfo = new TextView(this);
@@ -135,6 +143,30 @@ public class PesActivity extends Activity {
             srt.setText(sorted ? "Ordem original" : "Ordem A–Z");
             rebuildView();
         });
+        grp.setOnClickListener(v -> {
+            if (grouped) {
+                grouped = false;
+                grp.setText("Por time");
+                rebuildView();
+                return;
+            }
+            final EditText num = new EditText(this);
+            num.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+            num.setText(String.valueOf(teamSize));
+            num.setSelection(num.getText().length());
+            new AlertDialog.Builder(this)
+                .setTitle("Jogadores por time")
+                .setView(num)
+                .setPositiveButton("Agrupar", (dd, w) -> {
+                    int val = 0;
+                    try { val = Integer.parseInt(num.getText().toString().trim()); } catch (Exception ex) {}
+                    if (val < 1 || val > 200) { toast("Número inválido"); return; }
+                    teamSize = val;
+                    grouped = true;
+                    grp.setText("Sem grupos");
+                    rebuildView();
+                }).setNegativeButton("Cancelar", null).show();
+        });
         enc.setOnClickListener(v -> {
             boolean iso = cs.name().equalsIgnoreCase("ISO-8859-1");
             cs = Charset.forName(iso ? "UTF-8" : "ISO-8859-1");
@@ -147,7 +179,10 @@ public class PesActivity extends Activity {
             public void onTextChanged(CharSequence s, int a, int b2, int c) {}
             public void afterTextChanged(Editable e) { rebuildView(); }
         });
-        el.setOnItemClickListener((p, v, pos, id) -> editEntry(view.get(pos)));
+        el.setOnItemClickListener((p, v, pos, id) -> {
+            int ix = view.get(pos);
+            if (ix >= 0) editEntry(ix); // -1 = cabecalho de time (nao edita)
+        });
     }
 
     int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density); }
@@ -593,25 +628,59 @@ public class PesActivity extends Activity {
         rebuildView();
     }
 
+    /** Cabecalho de um time: nome vem da tabela de Times (mesma posicao); sem ela, "Time N". */
+    String teamHeader(int tm) {
+        String nm = "Time " + (tm + 1);
+        Table tt = null;
+        for (Table t : tables) {
+            if (PesClassifier.TIM.equals(cat(t)) && (tt == null || t.ents.size() > tt.ents.size())) tt = t;
+        }
+        if (tt != null && tm < tt.ents.size()) {
+            String s = dec(tt.ents.get(tm)).trim();
+            if (!s.isEmpty()) nm = s;
+        }
+        int a = tm * teamSize + 1, z = Math.min(cur.ents.size(), (tm + 1) * teamSize);
+        return "\n━━  " + (tm + 1) + ". " + nm + "  ━━\nJogadores " + a + " a " + z + "\n";
+    }
+
     void rebuildView() {
         if (cur == null) return;
         String q = search.getText().toString().toLowerCase();
+        final boolean grp = grouped && !PesClassifier.TIM.equals(cat(cur));
+        final int ts = teamSize;
         view.clear();
         for (int i = 0; i < cur.ents.size(); i++) {
             if (q.isEmpty() || dec(cur.ents.get(i)).toLowerCase().contains(q)) view.add(i);
         }
-        if (sorted) {
+        if (grp) {
+            // por time; dentro do time, ordem original (ou A–Z se pedido)
+            Collections.sort(view, (a, b) -> {
+                int ta = a / ts, tb = b / ts;
+                if (ta != tb) return ta - tb;
+                return sorted ? dec(cur.ents.get(a)).compareToIgnoreCase(dec(cur.ents.get(b))) : a - b;
+            });
+        } else if (sorted) {
             Collections.sort(view, (a, b) -> dec(cur.ents.get(a)).compareToIgnoreCase(dec(cur.ents.get(b))));
         }
         eRows.clear();
+        ArrayList<Integer> nv = new ArrayList<>(); // posicoes da lista; -1 = cabecalho de time
+        int lastTeam = -1;
         for (int i : view) {
+            if (grp) {
+                int tm = i / ts;
+                if (tm != lastTeam) { lastTeam = tm; eRows.add(teamHeader(tm)); nv.add(-1); }
+            }
             Ent e = cur.ents.get(i);
             eRows.add((i + 1) + ".  " + dec(e) + (e.cap >= 0 ? "   [" + e.raw.length + "/" + e.cap + " bytes]" : ""));
+            nv.add(i);
         }
+        view.clear();
+        view.addAll(nv);
         eAdapter.notifyDataSetChanged();
         entInfo.setText("[" + cat(cur) + "] " + cur.file + " @" + cur.begin + " · " + KIND[cur.kind]
             + (cur.kind == 0 ? " · limite fixo por nome (bytes)" : cur.kind == 3 ? " · tamanho livre"
             : " · tamanho livre; espaço vazio após a tabela: " + slackOf(cur) + " bytes")
+            + (grp ? "\nAgrupado por time: " + ts + " jogadores por time (nome do time = mesma posição na tabela de Times)." : "")
             + "\nA ordem A–Z é só de visualização: a posição de cada nome no jogo não muda.");
     }
 
