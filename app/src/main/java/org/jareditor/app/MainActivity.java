@@ -40,8 +40,9 @@ public class MainActivity extends Activity {
     // Resultado do teste de abrir o arquivo como imagem.
     // type != null  -> o arquivo inteiro abriu como imagem (png, jpg, gif, bmp, webp...)
     // embedded > 0  -> não abriu inteiro, mas tem PNG(s) dentro (comum em pacotes de texturas)
+    // packed        -> PNG empacotado da engine CWA (.mid sem assinatura/CRC): type = "png", editado via conversão
     // nenhum dos dois -> não é imagem
-    static class Scan { String type; int w, h, embedded; boolean isImage() { return type != null || embedded > 0; } }
+    static class Scan { String type; int w, h, embedded; boolean packed; boolean isImage() { return type != null || embedded > 0; } }
 
     final ConcurrentHashMap<String, Scan> scan = new ConcurrentHashMap<>();
     volatile boolean cancelScan;
@@ -91,7 +92,7 @@ public class MainActivity extends Activity {
                 String tag = "";
                 int color = Color.BLACK;
                 if (sc != null && sc.type != null) {
-                    tag = "[IMG " + sc.type.toUpperCase() + " " + sc.w + "x" + sc.h + "] ";
+                    tag = (sc.packed ? "[IMG MID/PNG " : "[IMG " + sc.type.toUpperCase() + " ") + sc.w + "x" + sc.h + "] ";
                     color = Color.rgb(0, 120, 0);
                 } else if (sc != null && sc.embedded > 0) {
                     tag = "[PNG embutido x" + sc.embedded + "] ";
@@ -158,10 +159,18 @@ public class MainActivity extends Activity {
         return i >= 0 && i + 1 < m.length() ? m.substring(i + 1) : "img";
     }
 
-    // Testa um arquivo: 1) o arquivo inteiro abre como imagem? 2) tem PNG embutido?
+    // Testa um arquivo: 0) é PNG empacotado da engine CWA? 1) o arquivo inteiro abre como imagem? 2) tem PNG embutido?
     static Scan probe(byte[] d) {
         Scan s = new Scan();
         if (d == null || d.length < 8) return s;
+        int[] pk = PackedImg.size(d);
+        if (pk != null) {
+            s.type = "png";
+            s.packed = true;
+            s.w = pk[0];
+            s.h = pk[1];
+            return s;
+        }
         try {
             BitmapFactory.Options o = new BitmapFactory.Options();
             o.inJustDecodeBounds = true;
@@ -501,6 +510,13 @@ public class MainActivity extends Activity {
                 InputStream is = getContentResolver().openInputStream(u);
                 byte[] nb;
                 try { nb = readAll(is); } finally { is.close(); }
+                // substituindo um .mid de imagem (PNG empacotado) por PNG/JPG normal: converte para o formato do jogo
+                Scan oldSc = scan.get(replaceTarget);
+                if (oldSc != null && oldSc.packed && !PackedImg.isPacked(nb) && imgType(nb) != null) {
+                    Bitmap nbm = BitmapFactory.decodeByteArray(nb, 0, nb.length);
+                    byte[] pk = nbm == null ? null : PackedImg.fromBitmap(nbm, files.get(replaceTarget));
+                    if (pk != null) nb = pk;
+                }
                 Thumbs.replace(this, replaceTarget, files.get(replaceTarget), nb, r -> { put(replaceTarget, r); refresh(); });
                 refresh();
                 toast("Substituído");
@@ -662,9 +678,14 @@ public class MainActivity extends Activity {
 
     void openImage(String name, Src s) {
         byte[] data = files.get(name);
+        Scan sc0 = scan.get(name);
         Bitmap bm = null;
         try {
-            if (s.kind == 0) bm = BitmapFactory.decodeByteArray(data, 0, data.length);
+            if (s.kind == 0) {
+                byte[] src = data;
+                if (sc0 != null && sc0.packed) src = PackedImg.toPng(data); // .mid de imagem da engine CWA
+                if (src != null) bm = BitmapFactory.decodeByteArray(src, 0, src.length);
+            }
             else if (s.kind == 1) bm = BitmapFactory.decodeByteArray(data, s.off, s.len);
             else bm = decodeRaw(data, s.off, s.w, s.h, s.fmt);
         } catch (Exception e) {}
@@ -805,11 +826,19 @@ public class MainActivity extends Activity {
         box.addView(pv, new LinearLayout.LayoutParams(-1, 0, 1));
 
         String tag = s.kind == 1 ? " (PNG embutido)" : s.kind == 2 ? " (RAW)" : "";
+        Scan tagSc = scan.get(name);
+        if (s.kind == 0 && tagSc != null && tagSc.packed) tag = " (MID = PNG empacotado)";
         AlertDialog dlg = new AlertDialog.Builder(this).setTitle(name + tag).setView(box)
             .setPositiveButton("Salvar", (dd, w) -> {
                 try {
                     byte[] out;
+                    Scan saveSc = scan.get(name);
                     if (s.kind == 2) out = encodeRaw(pv.bmp, files.get(name), s.off, s.fmt);
+                    else if (s.kind == 0 && saveSc != null && saveSc.packed) {
+                        // volta para o formato empacotado que o jogo lê (não grava PNG normal dentro do .mid)
+                        out = PackedImg.fromBitmap(pv.bmp, files.get(name));
+                        if (out == null) { toast("Não consegui gravar: imagem grande demais para o formato"); return; }
+                    }
                     else {
                         byte[] img = encImg(pv.bmp, type);
                         if (s.kind == 1) {

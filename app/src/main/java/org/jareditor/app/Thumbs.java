@@ -61,6 +61,13 @@ final class Thumbs {
 
     private static Bitmap decode(byte[] d, MainActivity.Scan sc) {
         try {
+            if (sc.packed) { // PNG empacotado (.mid da engine CWA): vira PNG de verdade antes de decodificar
+                byte[] p = PackedImg.toPng(d);
+                if (p == null) {
+                    return null;
+                }
+                d = p;
+            }
             int off = 0, len = d.length;
             if (sc.type == null) { // pacote com PNG embutido: mostra o primeiro
                 ArrayList<int[]> f = MainActivity.findPng(d, 1);
