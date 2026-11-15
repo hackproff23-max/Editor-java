@@ -67,6 +67,9 @@ public class MainActivity extends Activity {
         row.addView(scanBtn, new LinearLayout.LayoutParams(0, -2, 1));
         root.addView(row);
         scanBtn.setOnClickListener(v -> scanAll());
+        Button valBtn = new Button(this); valBtn.setText("Valores (moedas, diamantes...)");
+        root.addView(valBtn);
+        valBtn.setOnClickListener(v -> valuesDialog());
         filter = new EditText(this);
         filter.setHint("Filtrar (ex: png, menu, .txt)");
         filter.setSingleLine(true);
@@ -128,6 +131,17 @@ public class MainActivity extends Activity {
 
     int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density); }
     void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
+
+    // Detecção rápida pelos primeiros bytes (usada também pelo PesActivity)
+    static String imgType(byte[] d) {
+        if (d == null || d.length < 12) return null;
+        if ((d[0] & 255) == 0x89 && d[1] == 'P' && d[2] == 'N' && d[3] == 'G') return "png";
+        if ((d[0] & 255) == 0xFF && (d[1] & 255) == 0xD8 && (d[2] & 255) == 0xFF) return "jpg";
+        if (d[0] == 'G' && d[1] == 'I' && d[2] == 'F' && d[3] == '8') return "gif";
+        if (d.length > 30 && d[0] == 'B' && d[1] == 'M' && d[6] == 0 && d[7] == 0 && d[8] == 0 && d[9] == 0) return "bmp";
+        if (d[0] == 'R' && d[1] == 'I' && d[2] == 'F' && d[3] == 'F' && d[8] == 'W' && d[9] == 'E' && d[10] == 'B' && d[11] == 'P') return "webp";
+        return null;
+    }
 
     // ---------- scanner: tenta ABRIR cada arquivo como imagem ----------
     static String extFromMime(String mime) {
@@ -251,6 +265,170 @@ public class MainActivity extends Activity {
         adapter.notifyDataSetChanged();
         info.setText(jarName + ": " + shown.size() + " de " + files.size() + " | " + img + " imagens, " + emb
             + " com PNG embutido (toque = editar, segurar = opções)");
+    }
+
+    // ---------- editor de valores (moedas, diamantes, rubis, cédulas...): decimal -> hex ----------
+    static final String[] VAL_MODES = { "Automático (texto + 16 + 32 bits)", "8 bits", "16 bits", "32 bits", "Só texto decimal" };
+    static final int MAXH = 600;
+
+    static class Hit { String name; int off, size; boolean le, text; long val; }
+
+    static Hit hit(String n, int off, int size, boolean le, boolean text, long v) {
+        Hit h = new Hit();
+        h.name = n; h.off = off; h.size = size; h.le = le; h.text = text; h.val = v;
+        return h;
+    }
+
+    static byte[] toBytes(long v, int w, boolean le) {
+        byte[] b = new byte[w];
+        for (int k = 0; k < w; k++) b[k] = (byte) (v >> (le ? 8 * k : 8 * (w - 1 - k)));
+        return b;
+    }
+
+    static boolean isDig(byte b) { return b >= '0' && b <= '9'; }
+
+    static String hx(byte[] b) {
+        StringBuilder s = new StringBuilder();
+        for (int i = 0; i < b.length; i++) s.append(String.format("%02X", b[i] & 255)).append(i + 1 < b.length ? " " : "");
+        return s.toString();
+    }
+
+    // Procura o valor em TODOS os arquivos (inclusive .class): como texto e como número binário (LE e BE)
+    ArrayList<Hit> findValue(long v, int mode) {
+        ArrayList<Hit> out = new ArrayList<>();
+        byte[] txt = Long.toString(v).getBytes();
+        for (Map.Entry<String, byte[]> en : files.entrySet()) {
+            if (out.size() >= MAXH) break;
+            String n = en.getKey();
+            byte[] d = en.getValue();
+            if (mode == 0 || mode == 4) {
+                for (int i = 0; i + txt.length <= d.length && out.size() < MAXH; i++) {
+                    if (d[i] != txt[0]) continue;
+                    boolean m = true;
+                    for (int k = 1; k < txt.length; k++) if (d[i + k] != txt[k]) { m = false; break; }
+                    if (!m) continue;
+                    if (i > 0 && isDig(d[i - 1])) continue;
+                    if (i + txt.length < d.length && isDig(d[i + txt.length])) continue;
+                    out.add(hit(n, i, txt.length, false, true, v));
+                }
+            }
+            if (mode == 4) continue;
+            for (int w = 1; w <= 4; w *= 2) {
+                if (mode == 0 && w == 1) continue;
+                if (mode == 1 && w != 1) continue;
+                if (mode == 2 && w != 2) continue;
+                if (mode == 3 && w != 4) continue;
+                if (v >= (1L << (8 * w))) continue;
+                for (int e = 0; e < (w == 1 ? 1 : 2); e++) {
+                    boolean le = e == 0;
+                    byte[] pat = toBytes(v, w, le);
+                    for (int i = 0; i + w <= d.length && out.size() < MAXH; i++) {
+                        if (d[i] != pat[0]) continue;
+                        boolean m = true;
+                        for (int k = 1; k < w; k++) if (d[i + k] != pat[k]) { m = false; break; }
+                        if (m) out.add(hit(n, i, w, le, false, v));
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    static boolean fits(Hit h, long nv) { return nv >= 0 && (h.text || nv < (1L << (8 * h.size))); }
+
+    static byte[] patch(byte[] d, Hit h, long nv) {
+        if (h.text) {
+            byte[] t = Long.toString(nv).getBytes();
+            byte[] o = new byte[d.length - h.size + t.length];
+            System.arraycopy(d, 0, o, 0, h.off);
+            System.arraycopy(t, 0, o, h.off, t.length);
+            System.arraycopy(d, h.off + h.size, o, h.off + t.length, d.length - h.off - h.size);
+            return o;
+        }
+        byte[] o = d.clone();
+        System.arraycopy(toBytes(nv, h.size, h.le), 0, o, h.off, h.size);
+        return o;
+    }
+
+    // Mostra o decimal digitado convertido para hex e os bytes que serão gravados
+    static String hexInfo(Hit h, String s) {
+        try {
+            long nv = Long.parseLong(s.trim());
+            if (!fits(h, nv)) return "Valor fora do limite (máx " + (h.text ? "-" : "" + ((1L << (8 * h.size)) - 1)) + ")";
+            byte[] b = h.text ? Long.toString(nv).getBytes() : toBytes(nv, h.size, h.le);
+            return "Hex: 0x" + Long.toHexString(nv).toUpperCase() + "\nBytes gravados: " + hx(b);
+        } catch (Exception e) { return "Digite um número decimal"; }
+    }
+
+    void valuesDialog() {
+        if (files.isEmpty()) { toast("Abra um .jar primeiro"); return; }
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        l.setPadding(dp(16), dp(8), dp(16), 0);
+        final EditText ev = num("Valor atual (decimal), ex: 1500", "");
+        final Spinner sp = new Spinner(this);
+        sp.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, VAL_MODES));
+        l.addView(ev);
+        l.addView(sp);
+        new AlertDialog.Builder(this).setTitle("Procurar valor em todos os arquivos").setView(l)
+            .setPositiveButton("Procurar", (d, w) -> {
+                long v;
+                try { v = Long.parseLong(ev.getText().toString().trim()); }
+                catch (Exception ex) { toast("Digite um número"); return; }
+                if (v <= 0) { toast("Use um valor maior que 0"); return; }
+                showHits(v, findValue(v, sp.getSelectedItemPosition()));
+            }).setNegativeButton("Cancelar", null).show();
+    }
+
+    void showHits(long v, final ArrayList<Hit> hs) {
+        if (hs.isEmpty()) { toast("Valor " + v + " não encontrado"); return; }
+        String[] it = new String[hs.size()];
+        for (int i = 0; i < it.length; i++) {
+            Hit h = hs.get(i);
+            String t = h.text ? "texto" : (h.size * 8) + "b" + (h.size == 1 ? "" : h.le ? " LE" : " BE");
+            String hv = h.text ? "" : "  0x" + String.format("%0" + (h.size * 2) + "X", v);
+            it[i] = "[" + t + "] " + h.name + " @" + h.off + hv;
+        }
+        new AlertDialog.Builder(this).setTitle(hs.size() + (hs.size() >= MAXH ? "+" : "") + " resultado(s) para " + v)
+            .setItems(it, (d, w) -> editHits(hs.subList(w, w + 1), "Editar " + hs.get(w).name))
+            .setNeutralButton("Editar todos", (d, w) -> editHits(hs, "Editar todos (" + hs.size() + ")"))
+            .setNegativeButton("Fechar", null).show();
+    }
+
+    void editHits(final List<Hit> hs, String title) {
+        final Hit first = hs.get(0);
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        l.setPadding(dp(16), dp(8), dp(16), 0);
+        final EditText ev = num("Novo valor (decimal)", "" + first.val);
+        final TextView tv = new TextView(this);
+        tv.setText(hexInfo(first, "" + first.val));
+        ev.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            public void onTextChanged(CharSequence s, int a, int b, int c) {}
+            public void afterTextChanged(Editable e) { tv.setText(hexInfo(first, e.toString())); }
+        });
+        l.addView(ev);
+        l.addView(tv);
+        new AlertDialog.Builder(this).setTitle(title).setView(l)
+            .setPositiveButton("Aplicar", (d, w) -> {
+                long nv;
+                try { nv = Long.parseLong(ev.getText().toString().trim()); }
+                catch (Exception ex) { toast("Valor inválido"); return; }
+                ArrayList<Hit> sorted = new ArrayList<>(hs);
+                Collections.sort(sorted, (a, b) -> a.name.equals(b.name) ? b.off - a.off : a.name.compareTo(b.name));
+                HashSet<String> touched = new HashSet<>();
+                int ok = 0, skip = 0;
+                for (Hit h : sorted) {
+                    if (!fits(h, nv)) { skip++; continue; }
+                    files.put(h.name, patch(files.get(h.name), h, nv));
+                    touched.add(h.name);
+                    ok++;
+                }
+                for (String n : touched) scan.put(n, probe(files.get(n)));
+                refresh();
+                toast(ok + " alterado(s)" + (skip > 0 ? ", " + skip + " fora do limite" : "") + ". Use Salvar .jar");
+            }).setNegativeButton("Cancelar", null).show();
     }
 
     byte[] readAll(InputStream in) throws IOException {
