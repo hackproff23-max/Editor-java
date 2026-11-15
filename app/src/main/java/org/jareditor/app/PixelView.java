@@ -24,10 +24,18 @@ public class PixelView extends View {
     // ---- PNG de referencia (HD, tipo mapa): nao altera o desenho ----
     public Bitmap ref;
     public boolean refMove = true, refAbove = false;
+    // true: mostra a referencia ja em pixel art, encaixada nas casas da grade (o HD continua guardado)
+    public boolean refPixel = true;
     public int refAlpha = 128; // 0..255
     public Runnable onRef;
     float refX, refY, refS = 1, rlx, rly;
-    final Paint rp = new Paint();
+    boolean refDrag;
+    final Paint rp = new Paint(), rpp = new Paint();
+    // cache da versao pixel art da referencia
+    PixelArt.Cells cells;
+    Bitmap cellsRef;
+    float cellsX, cellsY, cellsS;
+    int cellsW, cellsH;
 
     public PixelView(Context c, Bitmap b) {
         super(c);
@@ -38,6 +46,7 @@ public class PixelView extends View {
         op.setColor(0xFFFFFF00);
         op.setStrokeWidth(3);
         rp.setFilterBitmap(true); rp.setDither(true); rp.setAntiAlias(false);
+        rpp.setFilterBitmap(false); rpp.setDither(false); rpp.setAntiAlias(false);
         Bitmap ck = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888);
         Canvas cc = new Canvas(ck);
         cc.drawColor(0xFFBBBBBB);
@@ -123,17 +132,44 @@ public class PixelView extends View {
     }
 
     // ---------- PNG de referencia ----------
-    // Guarda a imagem em resolucao original; so a exibicao e reduzida (com filtro), entao
-    // da para diminuir e dar zoom sem perder qualidade. O desenho de baixo nao e alterado.
+    // O HD fica guardado em resolucao original e nunca e alterado. Na tela ele aparece em HD
+    // (suave) ou em pixel art (media de area, encaixada nas casas da grade). Ao colar, vai a versao pixel art.
+
+    /** Versao pixel art da referencia para a posicao/tamanho atuais (com cache). */
+    PixelArt.Cells cells() {
+        if (ref == null) return null;
+        int bw = bmp.getWidth(), bh = bmp.getHeight();
+        if (cells != null && cellsRef == ref && cellsX == refX && cellsY == refY && cellsS == refS
+            && cellsW == bw && cellsH == bh) {
+            return cells;
+        }
+        cells = PixelArt.convert(ref, refX, refY, refS, refS, bw, bh);
+        cellsRef = ref;
+        cellsX = refX; cellsY = refY; cellsS = refS;
+        cellsW = bw; cellsH = bh;
+        return cells;
+    }
+
     void drawRef(Canvas c) {
-        rp.setAlpha(refAlpha);
-        c.save();
-        c.translate(tx, ty);
-        c.scale(scale, scale);
-        c.translate(refX, refY);
-        c.scale(refS, refS);
-        c.drawBitmap(ref, 0, 0, rp);
-        c.restore();
+        PixelArt.Cells k = (refPixel && !refDrag) ? cells() : null;
+        if (k != null) {
+            // pixel art: cada casa da referencia cobre exatamente uma casa do desenho
+            rpp.setAlpha(refAlpha);
+            c.save();
+            c.translate(tx, ty);
+            c.scale(scale, scale);
+            c.drawBitmap(k.bmp, k.x0, k.y0, rpp);
+            c.restore();
+        } else {
+            rp.setAlpha(refAlpha);
+            c.save();
+            c.translate(tx, ty);
+            c.scale(scale, scale);
+            c.translate(refX, refY);
+            c.scale(refS, refS);
+            c.drawBitmap(ref, 0, 0, rp);
+            c.restore();
+        }
         if (refMove) {
             c.drawRect(tx + refX * scale, ty + refY * scale,
                 tx + (refX + ref.getWidth() * refS) * scale, ty + (refY + ref.getHeight() * refS) * scale, op);
@@ -143,6 +179,7 @@ public class PixelView extends View {
     public void setReference(Bitmap src) {
         try { src.setHasMipMap(true); } catch (Throwable ignored) { }
         ref = src;
+        cells = null;
         int bw = bmp.getWidth(), bh = bmp.getHeight();
         refS = Math.min(bw / (float) src.getWidth(), bh / (float) src.getHeight());
         refX = (bw - src.getWidth() * refS) / 2f;
@@ -181,22 +218,32 @@ public class PixelView extends View {
         invalidate();
     }
 
-    // Cola a referencia no desenho, pixelada (sem suavizar), na posicao e tamanho atuais
+    /** Alterna a exibicao da referencia entre pixel art (casas da grade) e HD. */
+    public void setRefPixel(boolean on) {
+        refPixel = on;
+        if (onRef != null) onRef.run();
+        invalidate();
+    }
+
+    // Cola a referencia no desenho em PIXEL ART: cada casa recebe a media da area do HD que cai nela,
+    // cobrindo certinho as casas da grade, na posicao e tamanho atuais. O HD continua como referencia.
     public boolean pasteRef() {
-        if (ref == null) return false;
-        int w = Math.round(ref.getWidth() * refS), h = Math.round(ref.getHeight() * refS);
-        if (w < 1 || h < 1 || w > 4096 || h > 4096) return false;
+        PixelArt.Cells k = cells();
+        if (k == null) return false;
         pushUndo();
-        Bitmap px = Bitmap.createScaledBitmap(ref, w, h, false);
         Paint pp = new Paint();
-        pp.setAlpha(refAlpha);
-        new Canvas(bmp).drawBitmap(px, Math.round(refX), Math.round(refY), pp);
+        pp.setFilterBitmap(false);
+        pp.setAntiAlias(false);
+        pp.setDither(false);
+        new Canvas(bmp).drawBitmap(k.bmp, k.x0, k.y0, pp);
         invalidate();
         return true;
     }
 
     public void removeRef() {
         ref = null;
+        cells = null;
+        cellsRef = null;
         if (onRef != null) onRef.run();
         invalidate();
     }
@@ -346,11 +393,14 @@ public class PixelView extends View {
         }
         float x = e.getX(), y = e.getY();
         if (ref != null && refMove) {
-            // arrastar a referencia (movimento livre, sem prender na grade)
-            if (a == MotionEvent.ACTION_DOWN) { rlx = x; rly = y; }
+            // arrastar a referencia (movimento livre, sem prender na grade); durante o arrasto mostra o HD (leve)
+            if (a == MotionEvent.ACTION_DOWN) { rlx = x; rly = y; refDrag = true; }
             else if (a == MotionEvent.ACTION_MOVE) {
                 refX += (x - rlx) / scale; refY += (y - rly) / scale;
                 rlx = x; rly = y;
+                invalidate();
+            } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                refDrag = false;
                 invalidate();
             }
             return true;

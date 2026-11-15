@@ -215,7 +215,7 @@ final class Thumbs {
             if (src == null) {
                 return null;
             }
-            Bitmap dst = Bitmap.createScaledBitmap(src, w, h, false);
+            Bitmap dst = PixelArt.fit(src, w, h);
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             if ("jpg".equals(type)) {
                 dst.compress(Bitmap.CompressFormat.JPEG, 100, out);

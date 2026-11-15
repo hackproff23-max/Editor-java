@@ -789,14 +789,14 @@ public class MainActivity extends Activity {
         refBar.setOrientation(LinearLayout.VERTICAL);
         LinearLayout rb1 = new LinearLayout(this);
         final Button rMove = mk("Mover ✓"), rMenos = mk("Tam −"), rMais = mk("Tam +"), rAbove = mk("Abaixo"),
-            rPaste = mk("Colar"), rDel = mk("Tirar");
+            rPaste = mk("Colar"), rDel = mk("Tirar"), rPix = mk("Pixel ✓");
         rMove.setOnClickListener(v -> pv.setRefMove(!pv.refMove));
         rMenos.setOnClickListener(v -> pv.refSize(0.9f));
         rMais.setOnClickListener(v -> pv.refSize(1.1f));
         rAbove.setOnClickListener(v -> pv.setRefAbove(!pv.refAbove));
-        rPaste.setOnClickListener(v -> toast(pv.pasteRef() ? "Colada no desenho (pode desfazer)" : "Tamanho fora do limite"));
+        rPaste.setOnClickListener(v -> toast(pv.pasteRef() ? "Colada em pixel art (pode desfazer)" : "A imagem está fora do desenho"));
         rDel.setOnClickListener(v -> pv.removeRef());
-        Button[] rbs = { rMove, rMenos, rMais, rAbove, rPaste, rDel };
+        Button[] rbs = { rMove, rMenos, rMais, rAbove, rPix, rPaste, rDel }; rPix.setOnClickListener(v -> pv.setRefPixel(!pv.refPixel));
         for (Button x : rbs) rb1.addView(x, new LinearLayout.LayoutParams(0, -2, 1));
         refBar.addView(rb1);
         LinearLayout rb2 = new LinearLayout(this);
@@ -819,7 +819,7 @@ public class MainActivity extends Activity {
         pv.onRef = () -> {
             refBar.setVisibility(pv.ref != null ? View.VISIBLE : View.GONE);
             rMove.setText(pv.refMove ? "Mover ✓" : "Mover");
-            rAbove.setText(pv.refAbove ? "Acima" : "Abaixo");
+            rAbove.setText(pv.refAbove ? "Acima" : "Abaixo"); rPix.setText(pv.refPixel ? "Pixel ✓" : "HD");
         };
         pv.setRefAlpha(50);
         box.addView(refBar);
