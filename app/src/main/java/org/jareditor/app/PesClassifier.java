@@ -155,8 +155,21 @@ final class PesClassifier {
         return spaces >= 2 && letters * 100 >= n * 60 && other * 10 <= n && accent * 4 <= letters;
     }
 
-    /** Categoria de uma tabela, olhando todos os nomes dela. */
+    /** Abreviação de clube no meio do nome: F.C., C.F., A.S., R.C.D. (duas ou mais letras soltas seguidas). */
+    private static boolean abbrevClub(String u) {
+        int run = 0;
+        for (String w : u.split(" ")) {
+            if (w.length() == 1) { if (++run >= 2) return true; } else run = 0;
+        }
+        return false;
+    }
+
     static String classify(List<String> names) {
+        return classify(names, 0);
+    }
+
+    /** Categoria de uma tabela, olhando todos os nomes dela. trail = bytes de dados por nome (0 = não se sabe). */
+    static String classify(List<String> names, int trail) {
         int n = names.size();
         if (n == 0) return LIX;
         int nameOk = 0, textOk = 0;
@@ -174,16 +187,17 @@ final class PesClassifier {
             String u = norm(s);
             if (LANG.contains(u)) lang++;
             if (COUNTRIES.contains(u)) sel++;
-            if (CLUBS.contains(u) || hasTok(u, CLUB_TOK)) club++;
+            if (CLUBS.contains(u) || hasTok(u, CLUB_TOK) || abbrevClub(u)) club++;
             if (hasTok(u, EST_TOK)) est++;
             if (hasTok(u, CAM_TOK)) cam++;
         }
         if (lang >= 3 && lang * 100 >= n * 25) return IDI;
+        if (sel >= 5 && club >= 5 && sel * 100 >= n * 15 && club * 100 >= n * 15) return TIM; // times e seleções na mesma tabela
         if (sel >= 5 && sel * 100 >= n * 30) return SEL;
         if (est >= 3 && est * 100 >= n * 30) return EST;
         if (cam >= 3 && cam * 100 >= n * 30) return CAM;
         if (club >= 4 && club * 100 >= n * 25) return TIM;
-        if (n >= 20) return JOG;
+        if (n >= 20) return trail >= 64 ? TIM : JOG; // registro grande = time/seleção; pequeno = jogador
         return OUT;
     }
 

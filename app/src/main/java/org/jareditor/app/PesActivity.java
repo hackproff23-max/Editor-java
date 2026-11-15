@@ -24,6 +24,8 @@ import java.util.zip.*;
  *  1 = strings UTF com tamanho de 2 bytes (readUTF)   -> tamanho livre
  *  2 = strings terminadas em zero, em sequencia        -> tamanho livre
  *  3 = arquivo de texto, uma linha por nome            -> tamanho livre
+ *  4 = [tam. 1 byte][nome UTF-8][N bytes de dados], em sequência (PES: jogadores e times)
+ *      -> tamanho livre; nome menor é completado com espaço para não deslocar o arquivo
  * Cada tabela e classificada sozinha (PesClassifier) em Jogadores, Times, Selecoes, Estadios,
  * Campeonatos, Idiomas, Textos do jogo, Outros nomes ou Ocultos (lixo binario). A marca manual
  * (segurar na tabela) vale mais e fica guardada para esse .jar.
@@ -32,12 +34,12 @@ import java.util.zip.*;
  */
 public class PesActivity extends Activity {
     static final int REQ_OPEN = 11, REQ_SAVE = 12;
-    static final String[] KIND = { "campos fixos", "UTF (tam. 2 bytes)", "texto terminado em zero", "linhas de texto" };
+    static final String[] KIND = { "campos fixos", "UTF (tam. 2 bytes)", "texto terminado em zero", "linhas de texto", "nome (tam. 1 byte) + dados" };
     static final String PREFS = "pes_marcas";
 
-    static class Ent { int start, cap = -1; byte[] raw; }
+    static class Ent { int start, cap = -1; byte[] raw, tail; }
     static class Table {
-        String file; int kind, begin, end, stride;
+        String file; int kind, begin, end, stride, trail;
         boolean crlf, endsNl;
         String auto = PesClassifier.OUT;
         ArrayList<Ent> ents = new ArrayList<>();
@@ -50,7 +52,7 @@ public class PesActivity extends Activity {
     final ArrayList<String> tRows = new ArrayList<>(), eRows = new ArrayList<>();
     final ArrayList<Integer> view = new ArrayList<>();
     String jarName = "pes.jar";
-    Charset cs = Charset.forName("ISO-8859-1");
+    Charset cs = Charset.forName("UTF-8");
     LinearLayout listRoot, entRoot, chipRow;
     TextView info, entInfo;
     ArrayAdapter<String> tAdapter, eAdapter;
@@ -92,7 +94,7 @@ public class PesActivity extends Activity {
         LinearLayout r2 = new LinearLayout(this);
         Button back = new Button(this); back.setText("Voltar");
         final Button srt = new Button(this); srt.setText("Ordem A–Z");
-        final Button enc = new Button(this); enc.setText("ISO-8859-1");
+        final Button enc = new Button(this); enc.setText("UTF-8");
         r2.addView(back, new LinearLayout.LayoutParams(0, -2, 1));
         r2.addView(srt, new LinearLayout.LayoutParams(0, -2, 1));
         r2.addView(enc, new LinearLayout.LayoutParams(0, -2, 1));
@@ -227,9 +229,73 @@ public class PesActivity extends Activity {
     // ---------- análise ----------
     static boolean isP(int b) { return (b >= 0x20 && b < 0x7F) || b >= 0xA0; }
 
+    /** Texto imprimível; aceita bytes 0x80+ (UTF-8: Á = C3 81). */
     static boolean printable(byte[] d, int off, int len) {
-        for (int i = off; i < off + len; i++) if (!isP(d[i] & 255)) return false;
+        for (int i = off; i < off + len; i++) {
+            int c = d[i] & 255;
+            if (c < 0x20 || c == 0x7F) return false;
+        }
         return true;
+    }
+
+    // ---------- tabela [tam. 1 byte][nome][N bytes de dados] (PES: jogadores e times) ----------
+    static boolean nameAt(byte[] d, int p, int minLen) {
+        if (p < 0 || p >= d.length) return false;
+        int len = d[p] & 255;
+        if (len < minLen || len > 40 || p + 1 + len > d.length) return false;
+        int letters = 0;
+        for (int i = p + 1; i <= p + len; i++) {
+            int c = d[i] & 255;
+            if (c < 0x20 || c == 0x7F) return false;
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c >= 0xC3) letters++;
+        }
+        return letters >= 1;
+    }
+
+    /** O registro em q é válido e depois dele ainda vem outro com dados de tamanho parecido (T ± 4). */
+    static boolean nextOk(byte[] d, int q, int T) {
+        int e = q + 1 + (d[q] & 255);
+        if (e + T >= d.length) return true;
+        for (int t = Math.max(0, T - 4); t <= T + 4; t++) if (nameAt(d, e + t, 1)) return true;
+        return false;
+    }
+
+    /** Segue a cadeia a partir de i. Cada item de out = {posição do byte de tamanho, bytes de dados}. Devolve o fim. */
+    static int chainU8(byte[] d, boolean[] used, int i, int T, boolean resync, ArrayList<int[]> out) {
+        int n = d.length, p = i;
+        int[] dls = { -1, 1, -2, 2, -3, 3, -4, 4 };
+        while (p < n && !used[p] && nameAt(d, p, 1)) {
+            int e = p + 1 + (d[p] & 255), nxt = e + T;
+            if (nxt >= n) { out.add(new int[] { p, n - e }); return n; }
+            if (nameAt(d, nxt, 1) && !used[nxt]) { out.add(new int[] { p, T }); p = nxt; continue; }
+            int fnd = -1, fdl = 0;
+            if (resync) {
+                for (int dl : dls) {
+                    int q = nxt + dl;
+                    if (T + dl < 0 || q < e || q >= n || used[q] || !nameAt(d, q, 1)) continue;
+                    if (nextOk(d, q, T)) { fnd = q; fdl = dl; break; }
+                }
+            }
+            if (fnd >= 0) { out.add(new int[] { p, T + fdl }); p = fnd; continue; }
+            out.add(new int[] { p, T });
+            return nxt;
+        }
+        return p;
+    }
+
+    /** Aceita a cadeia se quase todos os dados têm o mesmo tamanho e a maioria dos nomes parece texto. */
+    static boolean goodU8(byte[] d, ArrayList<int[]> es, int T) {
+        int var = 0, ok = 0;
+        for (int[] r : es) {
+            if (r[1] != T) var++;
+            int l = d[r[0]] & 255, lt = 0;
+            for (int i = r[0] + 1; i <= r[0] + l; i++) {
+                int c = d[i] & 255;
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c >= 0xC3 || c == 32) lt++;
+            }
+            if (lt * 2 >= l) ok++;
+        }
+        return var * 20 <= es.size() && ok * 4 >= es.size() * 3;
     }
 
     static boolean isText(byte[] d) {
@@ -333,6 +399,38 @@ public class PesActivity extends Activity {
             } else i++;
         }
 
+        // 2b) [tam. 1 byte][nome][N bytes de dados]: jogadores e times do PES
+        for (int i = 0; i < d.length; ) {
+            int first = d[i] & 255;
+            if (used[i] || first > 30 || !nameAt(d, i, 3)) { i++; continue; }
+            ArrayList<int[]> best = null;
+            int bestT = 0, bestEnd = 0;
+            for (int T = 2; T < 256; T++) {
+                for (int rs = 1; rs >= 0; rs--) {
+                    ArrayList<int[]> es = new ArrayList<>();
+                    int end = chainU8(d, used, i, T, rs == 1, es);
+                    if (es.size() >= 8 && goodU8(d, es, T)) {
+                        if (best == null || es.size() > best.size()) { best = es; bestT = T; bestEnd = end; }
+                        break;
+                    }
+                }
+            }
+            if (best == null) { i++; continue; }
+            Table t = new Table();
+            t.file = name; t.kind = 4; t.begin = i; t.end = bestEnd; t.trail = bestT;
+            for (int[] r : best) {
+                int len = d[r[0]] & 255, e0 = r[0] + 1 + len;
+                Ent en = new Ent();
+                en.start = r[0] + 1;
+                en.raw = Arrays.copyOfRange(d, r[0] + 1, e0);
+                en.tail = Arrays.copyOfRange(d, e0, e0 + r[1]);
+                t.ents.add(en);
+            }
+            tables.add(t);
+            for (int k = i; k < bestEnd; k++) used[k] = true;
+            i = bestEnd;
+        }
+
         // 3) campos fixos: nome + zeros, repetindo com passo constante
         ArrayList<int[]> runs = new ArrayList<>(); // inicio, tamanho, espaço até o próximo byte != 0
         for (int i = 0; i < d.length; ) {
@@ -401,7 +499,7 @@ public class PesActivity extends Activity {
         for (Table t : tables) {
             ArrayList<String> names = new ArrayList<>();
             for (Ent e : t.ents) names.add(dec(e));
-            t.auto = PesClassifier.classify(names);
+            t.auto = PesClassifier.classify(names, t.kind == 4 ? t.trail : 0);
         }
     }
 
@@ -446,7 +544,7 @@ public class PesActivity extends Activity {
             StringBuilder sm = new StringBuilder();
             for (int i = 0; i < Math.min(3, t.ents.size()); i++) sm.append(i > 0 ? ", " : "").append(dec(t.ents.get(i)));
             tRows.add("[" + cat(t) + (manual ? " ✎" : "") + "] " + t.file + " @" + t.begin + "\n"
-                + KIND[t.kind] + " · " + t.ents.size() + " nomes" + (t.kind == 0 ? " · passo " + t.stride : "") + "\n" + sm);
+                + KIND[t.kind] + " · " + t.ents.size() + " nomes" + (t.kind == 0 ? " · passo " + t.stride : t.kind == 4 ? " · " + t.trail + " bytes de dados por nome" : "") + "\n" + sm);
         }
         tAdapter.notifyDataSetChanged();
         int[] sel = filterCat == null ? null : cnt.get(filterCat);
@@ -540,6 +638,15 @@ public class PesActivity extends Activity {
                     rebuildView();
                     refreshTables();
                 } else {
+                    if (cur.kind == 4) {
+                        if (nb.length > 40) { toast("Máximo 40 bytes"); return; }
+                        if (nb.length < e.raw.length) { // mantém o tamanho: completa com espaço
+                            byte[] pd = new byte[e.raw.length];
+                            Arrays.fill(pd, (byte) 32);
+                            System.arraycopy(nb, 0, pd, 0, nb.length);
+                            nb = pd;
+                        }
+                    }
                     if (nb.length > 255) { toast("Nome grande demais"); return; }
                     commitVar(ei, nb);
                 }
@@ -553,6 +660,7 @@ public class PesActivity extends Activity {
             byte[] r = raws.get(i);
             if (t.kind == 1) { o.write(r.length >> 8); o.write(r.length & 255); o.write(r, 0, r.length); }
             else if (t.kind == 2) { o.write(r, 0, r.length); o.write(0); }
+            else if (t.kind == 4) { byte[] tl = t.ents.get(i).tail; o.write(r.length); o.write(r, 0, r.length); o.write(tl, 0, tl.length); }
             else { o.write(r, 0, r.length); if (i < raws.size() - 1 || t.endsNl) o.write(nl, 0, nl.length); }
         }
         return o.toByteArray();
