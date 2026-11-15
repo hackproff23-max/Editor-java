@@ -294,7 +294,7 @@ public class MainActivity extends Activity {
     }
 
     // Procura o valor em TODOS os arquivos (inclusive .class): como texto e como número binário (LE e BE)
-    ArrayList<Hit> findValue(long v, int mode) {
+    static ArrayList<Hit> findValue(Map<String, byte[]> files, long v, int mode) {
         ArrayList<Hit> out = new ArrayList<>();
         byte[] txt = Long.toString(v).getBytes();
         for (Map.Entry<String, byte[]> en : files.entrySet()) {
@@ -376,7 +376,7 @@ public class MainActivity extends Activity {
                 try { v = Long.parseLong(ev.getText().toString().trim()); }
                 catch (Exception ex) { toast("Digite um número"); return; }
                 if (v <= 0) { toast("Use um valor maior que 0"); return; }
-                showHits(v, findValue(v, sp.getSelectedItemPosition()));
+                showHits(v, findValue(files, v, sp.getSelectedItemPosition()));
             }).setNegativeButton("Cancelar", null).show();
     }
 

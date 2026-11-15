@@ -27,9 +27,14 @@ public class HomeActivity extends Activity {
         b2.setTextSize(18);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, (int) (72 * getResources().getDisplayMetrics().density));
         lp.topMargin = pad;
+        Button b3 = new Button(this);
+        b3.setText("Editor de save");
+        b3.setTextSize(18);
         l.addView(b1, lp);
         l.addView(b2, lp);
+        l.addView(b3, lp);
         setContentView(l);
+        b3.setOnClickListener(v -> startActivity(new Intent(this, SaveActivity.class)));
         b1.setOnClickListener(v -> startActivity(new Intent(this, MainActivity.class)));
         b2.setOnClickListener(v -> startActivity(new Intent(this, PesActivity.class)));
     }
