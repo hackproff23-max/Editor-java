@@ -3,6 +3,7 @@ package org.jareditor.app;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
@@ -17,39 +18,46 @@ import java.util.*;
 import java.util.zip.*;
 
 /**
- * Editor de nomes (jogadores/times) para PES Java ME.
+ * Editor de nomes (jogadores/times/selecoes...) para PES Java ME.
  * Procura tabelas de nomes dentro do .jar por padrao estrutural (sem depender de um formato fixo):
  *  0 = campos fixos (nome + zeros, passo constante)   -> edita ate o limite do campo
  *  1 = strings UTF com tamanho de 2 bytes (readUTF)   -> tamanho livre
  *  2 = strings terminadas em zero, em sequencia        -> tamanho livre
  *  3 = arquivo de texto, uma linha por nome            -> tamanho livre
+ * Cada tabela e classificada sozinha (PesClassifier) em Jogadores, Times, Selecoes, Estadios,
+ * Campeonatos, Idiomas, Textos do jogo, Outros nomes ou Ocultos (lixo binario). A marca manual
+ * (segurar na tabela) vale mais e fica guardada para esse .jar.
  * Nas tabelas de tamanho livre, o nome maior usa primeiro o espaco vazio (zeros) depois da tabela,
  * mantendo o resto do arquivo no mesmo lugar. So desloca o arquivo se voce confirmar.
  */
 public class PesActivity extends Activity {
     static final int REQ_OPEN = 11, REQ_SAVE = 12;
     static final String[] KIND = { "campos fixos", "UTF (tam. 2 bytes)", "texto terminado em zero", "linhas de texto" };
+    static final String PREFS = "pes_marcas";
 
     static class Ent { int start, cap = -1; byte[] raw; }
     static class Table {
         String file; int kind, begin, end, stride;
         boolean crlf, endsNl;
+        String auto = PesClassifier.OUT;
         ArrayList<Ent> ents = new ArrayList<>();
     }
 
     final LinkedHashMap<String, byte[]> files = new LinkedHashMap<>();
     final ArrayList<Table> tables = new ArrayList<>();
+    final ArrayList<Table> shown = new ArrayList<>();
     final HashMap<String, String> labels = new HashMap<>();
     final ArrayList<String> tRows = new ArrayList<>(), eRows = new ArrayList<>();
     final ArrayList<Integer> view = new ArrayList<>();
     String jarName = "pes.jar";
     Charset cs = Charset.forName("ISO-8859-1");
-    LinearLayout listRoot, entRoot;
+    LinearLayout listRoot, entRoot, chipRow;
     TextView info, entInfo;
     ArrayAdapter<String> tAdapter, eAdapter;
     EditText search;
     Table cur;
-    boolean sorted, inEntries;
+    boolean sorted, inEntries, pickDefault;
+    String filterCat = null; // null = todas as categorias
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -64,8 +72,14 @@ public class PesActivity extends Activity {
         row.addView(open, new LinearLayout.LayoutParams(0, -2, 1));
         row.addView(save, new LinearLayout.LayoutParams(0, -2, 1));
         listRoot.addView(row);
+        HorizontalScrollView chipScroll = new HorizontalScrollView(this);
+        chipScroll.setHorizontalScrollBarEnabled(false);
+        chipRow = new LinearLayout(this);
+        chipRow.setOrientation(LinearLayout.HORIZONTAL);
+        chipScroll.addView(chipRow);
+        listRoot.addView(chipScroll);
         info = new TextView(this);
-        info.setText("Abra o .jar do PES. O app procura as tabelas de nomes sozinho.");
+        info.setText("Abra o .jar do PES. O app procura as tabelas de nomes e separa em Jogadores, Times, Seleções e outras sozinho.");
         listRoot.addView(info);
         ListView tl = new ListView(this);
         tAdapter = new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, tRows);
@@ -111,8 +125,8 @@ public class PesActivity extends Activity {
             i.putExtra(Intent.EXTRA_TITLE, "editado_" + jarName);
             startActivityForResult(i, REQ_SAVE);
         });
-        tl.setOnItemClickListener((p, v, pos, id) -> openTable(tables.get(pos)));
-        tl.setOnItemLongClickListener((p, v, pos, id) -> { labelMenu(tables.get(pos)); return true; });
+        tl.setOnItemClickListener((p, v, pos, id) -> openTable(shown.get(pos)));
+        tl.setOnItemLongClickListener((p, v, pos, id) -> { labelMenu(shown.get(pos)); return true; });
         back.setOnClickListener(v -> showList());
         srt.setOnClickListener(v -> {
             sorted = !sorted;
@@ -173,7 +187,9 @@ public class PesActivity extends Activity {
                 ZipEntry e;
                 while ((e = z.getNextEntry()) != null) if (!e.isDirectory()) files.put(e.getName(), readAll(z));
                 z.close();
+                loadLabels();
                 analyze();
+                pickDefault = true;
                 refreshTables();
             } else if (req == REQ_SAVE) {
                 ZipOutputStream z = new ZipOutputStream(new BufferedOutputStream(getContentResolver().openOutputStream(u)));
@@ -188,6 +204,24 @@ public class PesActivity extends Activity {
         } catch (Exception ex) {
             toast("Erro: " + ex.getMessage());
         }
+    }
+
+    // ---------- marcas manuais (guardadas por .jar) ----------
+    void loadLabels() {
+        labels.clear();
+        SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String pre = jarName + "|";
+        for (Map.Entry<String, ?> en : sp.getAll().entrySet()) {
+            if (en.getKey().startsWith(pre) && en.getValue() instanceof String) {
+                labels.put(en.getKey().substring(pre.length()), (String) en.getValue());
+            }
+        }
+    }
+
+    void saveLabel(String key, String cat) {
+        SharedPreferences.Editor ed = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
+        if (cat == null) ed.remove(jarName + "|" + key); else ed.putString(jarName + "|" + key, cat);
+        ed.apply();
     }
 
     // ---------- análise ----------
@@ -357,23 +391,89 @@ public class PesActivity extends Activity {
 
     String dec(Ent e) { return new String(e.raw, cs); }
 
-    void refreshTables() {
-        tRows.clear();
+    /** Categoria valida da tabela: marca manual (se houver) ou a automatica. */
+    String cat(Table t) {
+        String lb = labels.get(key(t));
+        return lb != null ? lb : t.auto;
+    }
+
+    void classifyAll() {
         for (Table t : tables) {
-            String lb = labels.get(key(t));
+            ArrayList<String> names = new ArrayList<>();
+            for (Ent e : t.ents) names.add(dec(e));
+            t.auto = PesClassifier.classify(names);
+        }
+    }
+
+    void refreshTables() {
+        classifyAll();
+        // contagem por categoria
+        LinkedHashMap<String, int[]> cnt = new LinkedHashMap<>(); // {tabelas, nomes}
+        for (String c : PesClassifier.ALL) cnt.put(c, new int[2]);
+        for (Table t : tables) {
+            int[] a = cnt.get(cat(t));
+            if (a == null) { a = new int[2]; cnt.put(cat(t), a); }
+            a[0]++;
+            a[1] += t.ents.size();
+        }
+        if (pickDefault) { // ao abrir um .jar: ja mostra Jogadores (ou Times, ou tudo)
+            pickDefault = false;
+            filterCat = null;
+            for (String c : new String[] { PesClassifier.JOG, PesClassifier.TIM, PesClassifier.SEL }) {
+                if (cnt.get(c)[0] > 0) { filterCat = c; break; }
+            }
+        }
+        if (filterCat != null && (cnt.get(filterCat) == null || cnt.get(filterCat)[0] == 0)) filterCat = null;
+
+        // botoes de categoria
+        chipRow.removeAllViews();
+        addChip("Tudo " + tables.size(), null);
+        for (Map.Entry<String, int[]> en : cnt.entrySet()) {
+            if (en.getValue()[0] > 0) addChip(en.getKey() + " " + en.getValue()[0], en.getKey());
+        }
+
+        // tabelas da categoria escolhida (maiores primeiro; em "Tudo", agrupadas por categoria)
+        shown.clear();
+        for (Table t : tables) if (filterCat == null || filterCat.equals(cat(t))) shown.add(t);
+        Collections.sort(shown, (a, b) -> {
+            int ca = PesClassifier.order(cat(a)), cb = PesClassifier.order(cat(b));
+            return ca != cb ? ca - cb : b.ents.size() - a.ents.size();
+        });
+
+        tRows.clear();
+        for (Table t : shown) {
+            boolean manual = labels.containsKey(key(t));
             StringBuilder sm = new StringBuilder();
             for (int i = 0; i < Math.min(3, t.ents.size()); i++) sm.append(i > 0 ? ", " : "").append(dec(t.ents.get(i)));
-            tRows.add((lb != null ? "[" + lb + "] " : "") + t.file + " @" + t.begin + "\n"
+            tRows.add("[" + cat(t) + (manual ? " ✎" : "") + "] " + t.file + " @" + t.begin + "\n"
                 + KIND[t.kind] + " · " + t.ents.size() + " nomes" + (t.kind == 0 ? " · passo " + t.stride : "") + "\n" + sm);
         }
         tAdapter.notifyDataSetChanged();
-        info.setText(jarName + ": " + tables.size() + " tabelas de nomes (maiores primeiro). Toque = abrir, segurar = marcar como Jogadores/Times.");
+        int[] sel = filterCat == null ? null : cnt.get(filterCat);
+        info.setText(jarName + ": " + tables.size() + " tabelas · "
+            + (sel == null ? "todas as categorias" : filterCat + ": " + sel[0] + " tabela(s), " + sel[1] + " nomes")
+            + ".\nToque = abrir. Segurar = corrigir a categoria (✎ = marcada por você).");
+    }
+
+    void addChip(String text, final String cat) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setTextSize(12);
+        boolean on = (cat == null && filterCat == null) || (cat != null && cat.equals(filterCat));
+        b.setAlpha(on ? 1f : 0.55f);
+        b.setOnClickListener(v -> { filterCat = cat; refreshTables(); });
+        chipRow.addView(b, new LinearLayout.LayoutParams(-2, dp(42)));
     }
 
     void labelMenu(final Table t) {
-        final String[] it = { "Jogadores", "Times", "Outro", "Remover marca" };
-        new AlertDialog.Builder(this).setTitle(t.file).setItems(it, (d, w) -> {
-            if (w == 3) labels.remove(key(t)); else labels.put(key(t), it[w]);
+        final String[] cats = PesClassifier.ALL;
+        String[] it = new String[cats.length + 1];
+        System.arraycopy(cats, 0, it, 0, cats.length);
+        it[cats.length] = "Automático (remover marca)";
+        new AlertDialog.Builder(this).setTitle(t.file + " @" + t.begin + "\nAgora: " + cat(t)).setItems(it, (d, w) -> {
+            if (w == cats.length) { labels.remove(key(t)); saveLabel(key(t), null); }
+            else { labels.put(key(t), cats[w]); saveLabel(key(t), cats[w]); }
             refreshTables();
         }).show();
     }
@@ -411,8 +511,7 @@ public class PesActivity extends Activity {
             eRows.add((i + 1) + ".  " + dec(e) + (e.cap >= 0 ? "   [" + e.raw.length + "/" + e.cap + " bytes]" : ""));
         }
         eAdapter.notifyDataSetChanged();
-        String lb = labels.get(key(cur));
-        entInfo.setText((lb != null ? "[" + lb + "] " : "") + cur.file + " @" + cur.begin + " · " + KIND[cur.kind]
+        entInfo.setText("[" + cat(cur) + "] " + cur.file + " @" + cur.begin + " · " + KIND[cur.kind]
             + (cur.kind == 0 ? " · limite fixo por nome (bytes)" : cur.kind == 3 ? " · tamanho livre"
             : " · tamanho livre; espaço vazio após a tabela: " + slackOf(cur) + " bytes")
             + "\nA ordem A–Z é só de visualização: a posição de cada nome no jogo não muda.");
