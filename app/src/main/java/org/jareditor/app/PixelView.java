@@ -24,7 +24,7 @@ public class PixelView extends View {
     public PixelView(Context c, Bitmap b) {
         super(c);
         bmp = b;
-        gp.setColor(0x66000000);
+        gp.setColor(0x66000000); p.setFilterBitmap(false); p.setAntiAlias(false); p.setDither(false);
         gp.setStrokeWidth(0);
         Bitmap ck = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888);
         Canvas cc = new Canvas(ck);

@@ -97,7 +97,7 @@ public class MainActivity extends Activity {
                     color = Color.rgb(0, 80, 170);
                 }
                 t.setTextColor(color);
-                t.setText(tag + n + "  (" + data.length + " B)");
+                t.setText(tag + n + "  (" + data.length + " B)"); Thumbs.apply(MainActivity.this, t, n, data, sc);
                 return t;
             }
         };
@@ -479,7 +479,7 @@ public class MainActivity extends Activity {
                 InputStream is = getContentResolver().openInputStream(u);
                 byte[] nb;
                 try { nb = readAll(is); } finally { is.close(); }
-                put(replaceTarget, nb);
+                Thumbs.replace(this, replaceTarget, files.get(replaceTarget), nb, r -> { put(replaceTarget, r); refresh(); });
                 refresh();
                 toast("Substituído");
             }
