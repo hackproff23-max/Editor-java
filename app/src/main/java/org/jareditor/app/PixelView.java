@@ -17,7 +17,11 @@ public class PixelView extends View {
     float scale = 1, tx, ty, mx, my, pmx, pmy;
     boolean fitted, stroke, moved, multi;
     int lx, ly;
-    final Paint p = new Paint(), gp = new Paint(), cp = new Paint();
+    final Paint p = new Paint(), gp = new Paint(), cp = new Paint(), op = new Paint();
+    public boolean ovActive;
+    public Runnable onOverlay;
+    Bitmap ovSrc, ov;
+    int ovX, ovY, gx, gy;
     final ArrayList<Bitmap> undo = new ArrayList<>();
     final ScaleGestureDetector sg;
 
@@ -26,6 +30,7 @@ public class PixelView extends View {
         bmp = b;
         gp.setColor(0x66000000); p.setFilterBitmap(false); p.setAntiAlias(false); p.setDither(false);
         gp.setStrokeWidth(0);
+        op.setStyle(Paint.Style.STROKE); op.setColor(0xFFFFFF00); op.setStrokeWidth(3);
         Bitmap ck = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888);
         Canvas cc = new Canvas(ck);
         cc.drawColor(0xFFBBBBBB);
@@ -65,6 +70,15 @@ public class PixelView extends View {
         c.scale(scale, scale);
         c.drawBitmap(bmp, 0, 0, p);
         c.restore();
+        if (ovActive && ov != null) {
+            c.save();
+            c.translate(tx, ty);
+            c.scale(scale, scale);
+            c.drawBitmap(ov, ovX, ovY, p);
+            c.restore();
+            c.drawRect(tx + ovX * scale, ty + ovY * scale,
+                tx + (ovX + ov.getWidth()) * scale, ty + (ovY + ov.getHeight()) * scale, op);
+        }
         if (grid && scale >= 6) {
             int x0 = Math.max(0, (int) Math.floor(-tx / scale));
             int x1 = Math.min(bw, (int) Math.ceil((getWidth() - tx) / scale));
@@ -94,6 +108,7 @@ public class PixelView extends View {
     }
 
     public void undo() {
+        if (ovActive) { endOverlay(); return; }
         if (undo.isEmpty()) return;
         Bitmap b = undo.remove(undo.size() - 1);
         boolean diff = b.getWidth() != bmp.getWidth() || b.getHeight() != bmp.getHeight();
@@ -105,6 +120,60 @@ public class PixelView extends View {
     void setBmp(Bitmap b) {
         bmp = (b.isMutable() && b.getConfig() == Bitmap.Config.ARGB_8888) ? b : b.copy(Bitmap.Config.ARGB_8888, true);
         refit();
+        invalidate();
+    }
+
+    // ---------- importar PNG: camada flutuante presa a grade de pixels ----------
+    public void beginOverlay(Bitmap src) {
+        ovSrc = src;
+        int bw = bmp.getWidth(), bh = bmp.getHeight();
+        int w = src.getWidth(), h = src.getHeight();
+        if (w > bw || h > bh) {
+            float r = Math.min(bw / (float) w, bh / (float) h);
+            w = Math.max(1, Math.round(w * r));
+            h = Math.max(1, Math.round(h * r));
+        }
+        makeOv(w, h);
+        ovX = (bw - ov.getWidth()) / 2;
+        ovY = (bh - ov.getHeight()) / 2;
+        ovActive = true;
+        if (onOverlay != null) onOverlay.run();
+        invalidate();
+    }
+
+    void makeOv(int w, int h) {
+        if (w == ovSrc.getWidth() && h == ovSrc.getHeight()) ov = ovSrc;
+        else ov = Bitmap.createScaledBitmap(ovSrc, w, h, false); // sem suavizar: pixels nitidos
+    }
+
+    public void overlaySize(float f) {
+        if (!ovActive || ov == null) return;
+        int w = ov.getWidth(), h = ov.getHeight();
+        int nw = Math.round(w * f);
+        if (nw == w) nw = w + (f > 1 ? 1 : -1);
+        nw = Math.max(1, nw);
+        int nh = Math.max(1, Math.round(nw * (float) ovSrc.getHeight() / ovSrc.getWidth()));
+        if (nw > 4096 || nh > 4096) return;
+        ovX += (w - nw) / 2;
+        ovY += (h - nh) / 2;
+        makeOv(nw, nh);
+        invalidate();
+    }
+
+    public void commitOverlay() {
+        if (!ovActive || ov == null) return;
+        pushUndo();
+        new Canvas(bmp).drawBitmap(ov, ovX, ovY, p);
+        endOverlay();
+    }
+
+    public void cancelOverlay() { endOverlay(); }
+
+    void endOverlay() {
+        ovActive = false;
+        ov = null;
+        ovSrc = null;
+        if (onOverlay != null) onOverlay.run();
         invalidate();
     }
 
@@ -252,6 +321,12 @@ public class PixelView extends View {
             return true;
         }
         float x = e.getX(), y = e.getY();
+        if (ovActive) {
+            int qx = (int) Math.floor((x - tx) / scale), qy = (int) Math.floor((y - ty) / scale);
+            if (a == MotionEvent.ACTION_DOWN) { gx = qx - ovX; gy = qy - ovY; }
+            else if (a == MotionEvent.ACTION_MOVE) { ovX = qx - gx; ovY = qy - gy; invalidate(); }
+            return true;
+        }
         if (tool == 4) {
             if (a == MotionEvent.ACTION_DOWN) { mx = x; my = y; }
             else if (a == MotionEvent.ACTION_MOVE) { tx += x - mx; ty += y - my; mx = x; my = y; invalidate(); }

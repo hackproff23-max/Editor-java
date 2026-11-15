@@ -25,7 +25,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.*;
 
 public class MainActivity extends Activity {
-    static final int REQ_OPEN = 1, REQ_SAVE = 2, REQ_REPLACE = 3;
+    static final int REQ_OPEN = 1, REQ_SAVE = 2, REQ_REPLACE = 3, REQ_IMPORT = 4;
     static final int[] PAL = {
         0xFF000000, 0xFFFFFFFF, 0xFF7F7F7F, 0xFFBFBFBF, 0xFFFF0000, 0xFF7F0000, 0xFFFF7F00, 0xFFFFFF00,
         0xFF00FF00, 0xFF007F00, 0xFF00FFFF, 0xFF0000FF, 0xFF00007F, 0xFF7F00FF, 0xFFFF00FF, 0xFF7F3F00 };
@@ -52,6 +52,7 @@ public class MainActivity extends Activity {
     CheckBox onlyImg;
     TextView info;
     String jarName = "jogo.jar", replaceTarget;
+    PixelView importPv;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -475,6 +476,21 @@ public class MainActivity extends Activity {
                 }
                 z.close();
                 toast("Salvo!");
+            } else if (req == REQ_IMPORT && importPv != null) {
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inScaled = false;
+                o.inJustDecodeBounds = true;
+                InputStream i1 = getContentResolver().openInputStream(u);
+                try { BitmapFactory.decodeStream(i1, null, o); } finally { i1.close(); }
+                int ss = 1;
+                while (o.outWidth / ss > 2048 || o.outHeight / ss > 2048) ss *= 2;
+                o.inJustDecodeBounds = false;
+                o.inSampleSize = ss;
+                InputStream i2 = getContentResolver().openInputStream(u);
+                Bitmap ib;
+                try { ib = BitmapFactory.decodeStream(i2, null, o); } finally { i2.close(); }
+                if (ib == null) toast("Não consegui abrir essa imagem");
+                else { importPv.beginOverlay(ib); toast("Arraste a PNG para posicionar e toque em ✓ Aplicar"); }
             } else if (req == REQ_REPLACE && replaceTarget != null) {
                 InputStream is = getContentResolver().openInputStream(u);
                 byte[] nb;
@@ -690,6 +706,15 @@ public class MainActivity extends Activity {
             });
             tools.addView(tb[i], new LinearLayout.LayoutParams(0, -2, 1));
         }
+        Button bpng = mk("PNG");
+        bpng.setOnClickListener(v -> {
+            importPv = pv;
+            Intent ii = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            ii.addCategory(Intent.CATEGORY_OPENABLE);
+            ii.setType("image/*");
+            startActivityForResult(ii, REQ_IMPORT);
+        });
+        tools.addView(bpng, new LinearLayout.LayoutParams(0, -2, 1));
         box.addView(tools);
 
         HorizontalScrollView hs = new HorizontalScrollView(this);
@@ -732,6 +757,17 @@ public class MainActivity extends Activity {
         Button[] r3b = { bg, br, bf, bu, bz1, bz2 };
         for (Button x : r3b) r3.addView(x, new LinearLayout.LayoutParams(0, -2, 1));
         box.addView(r3);
+        final LinearLayout ovBar = new LinearLayout(this);
+        Button ovOk = mk("✓ Aplicar"), ovNo = mk("✕ Cancelar"), ovMenos = mk("Tam −"), ovMais = mk("Tam +");
+        ovOk.setOnClickListener(v -> pv.commitOverlay());
+        ovNo.setOnClickListener(v -> pv.cancelOverlay());
+        ovMenos.setOnClickListener(v -> pv.overlaySize(0.9f));
+        ovMais.setOnClickListener(v -> pv.overlaySize(1.1f));
+        Button[] ovb = { ovOk, ovNo, ovMenos, ovMais };
+        for (Button x : ovb) ovBar.addView(x, new LinearLayout.LayoutParams(0, -2, 1));
+        ovBar.setVisibility(View.GONE);
+        pv.onOverlay = () -> ovBar.setVisibility(pv.ovActive ? View.VISIBLE : View.GONE);
+        box.addView(ovBar);
         box.addView(pv, new LinearLayout.LayoutParams(-1, 0, 1));
 
         String tag = s.kind == 1 ? " (PNG embutido)" : s.kind == 2 ? " (RAW)" : "";
@@ -739,6 +775,7 @@ public class MainActivity extends Activity {
             .setPositiveButton("Salvar", (dd, w) -> {
                 try {
                     byte[] out;
+                    pv.commitOverlay();
                     if (s.kind == 2) out = encodeRaw(pv.bmp, files.get(name), s.off, s.fmt);
                     else {
                         byte[] img = encImg(pv.bmp, type);
