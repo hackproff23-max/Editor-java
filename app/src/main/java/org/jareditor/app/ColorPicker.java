@@ -18,6 +18,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
@@ -28,7 +29,7 @@ import java.util.ArrayList;
 
 /**
  * Paleta de cores: quadrado de saturacao/brilho + barra de matiz, hex com opacidade,
- * paleta pronta e favoritos (guardados no aparelho).
+ * paleta pronta, favoritos e historico de cores usadas (guardados no aparelho).
  */
 final class ColorPicker {
     private ColorPicker() {
@@ -48,7 +49,10 @@ final class ColorPicker {
         sv.addView(p);
         new AlertDialog.Builder(a, THEME)
             .setView(sv)
-            .setPositiveButton("OK", (d, w) -> cb.ok(p.argb()))
+            .setPositiveButton("OK", (d, w) -> {
+                p.pushHist(p.argb());
+                cb.ok(p.argb());
+            })
             .setNegativeButton("Cancelar", null)
             .show();
     }
@@ -65,6 +69,7 @@ final class ColorPicker {
         final SeekBar seek;
         final TextView tabColor, tabPal, tabFav;
         final LinearLayout paneColor, panePal, paneFav;
+        final LinearLayout histRow;
 
         Picker(Activity a, int argb) {
             super(a);
@@ -158,6 +163,23 @@ final class ColorPicker {
             l3.topMargin = dp(12);
             paneColor.addView(r3, l3);
 
+            // ---- historico de cores usadas (faixa rolavel)
+            TextView ht = new TextView(a);
+            ht.setText("Recentes");
+            ht.setTextColor(0xFF9A9A9A);
+            ht.setTextSize(13);
+            LayoutParams l4 = new LayoutParams(-1, -2);
+            l4.topMargin = dp(14);
+            paneColor.addView(ht, l4);
+            HorizontalScrollView histScroll = new HorizontalScrollView(a);
+            histScroll.setHorizontalScrollBarEnabled(false);
+            histRow = new LinearLayout(a);
+            histScroll.addView(histRow);
+            LayoutParams l5 = new LayoutParams(-1, -2);
+            l5.topMargin = dp(6);
+            l5.bottomMargin = dp(4);
+            paneColor.addView(histScroll, l5);
+
             // ---- abas Paleta e Favoritos
             panePal = new LinearLayout(a);
             panePal.setOrientation(VERTICAL);
@@ -184,6 +206,7 @@ final class ColorPicker {
             tabPal.setOnClickListener(v -> select(1));
             tabFav.setOnClickListener(v -> select(2));
 
+            buildHist();
             setArgb(argb);
             select(0);
         }
@@ -400,6 +423,55 @@ final class ColorPicker {
             h.setTextSize(12);
             h.setPadding(0, dp(8), 0, 0);
             paneFav.addView(h);
+        }
+
+        // ---- historico de cores usadas (as ultimas confirmadas com OK, mais recente primeiro)
+        ArrayList<Integer> hist() {
+            ArrayList<Integer> l = new ArrayList<>();
+            String s = prefs().getString("hist", "");
+            for (String p : s.split(",")) {
+                try {
+                    if (!p.isEmpty()) {
+                        l.add(Integer.parseInt(p));
+                    }
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            return l;
+        }
+
+        void pushHist(int c) {
+            ArrayList<Integer> l = hist();
+            l.remove(Integer.valueOf(c));
+            l.add(0, c);
+            while (l.size() > 24) {
+                l.remove(l.size() - 1);
+            }
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < l.size(); i++) {
+                sb.append(i > 0 ? "," : "").append(l.get(i));
+            }
+            prefs().edit().putString("hist", sb.toString()).apply();
+        }
+
+        void buildHist() {
+            histRow.removeAllViews();
+            ArrayList<Integer> l = hist();
+            if (l.isEmpty()) {
+                TextView t = new TextView(act);
+                t.setText("Nenhuma cor usada ainda");
+                t.setTextColor(0xFF777777);
+                t.setTextSize(12);
+                histRow.addView(t);
+                return;
+            }
+            for (final int c : l) {
+                Sw s = new Sw(act, c);
+                s.setOnClickListener(v -> choose(c, false));
+                LayoutParams lp = new LayoutParams(dp(38), dp(38));
+                lp.rightMargin = dp(6);
+                histRow.addView(s, lp);
+            }
         }
     }
 
