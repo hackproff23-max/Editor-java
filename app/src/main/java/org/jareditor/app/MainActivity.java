@@ -435,8 +435,7 @@ public class MainActivity extends Activity {
         ByteArrayOutputStream o = new ByteArrayOutputStream();
         byte[] buf = new byte[8192];
         int n;
-        while ((n = in.read(buf)) > 0) o.write(buf, 0, n);
-        in.close();
+        while ((n = in.read(buf)) > 0) o.write(buf, 0, n); // não fecha: quem chamou fecha (o ZipInputStream precisa continuar aberto)
         return o.toByteArray();
     }
 
@@ -477,7 +476,10 @@ public class MainActivity extends Activity {
                 z.close();
                 toast("Salvo!");
             } else if (req == REQ_REPLACE && replaceTarget != null) {
-                put(replaceTarget, readAll(getContentResolver().openInputStream(u)));
+                InputStream is = getContentResolver().openInputStream(u);
+                byte[] nb;
+                try { nb = readAll(is); } finally { is.close(); }
+                put(replaceTarget, nb);
                 refresh();
                 toast("Substituído");
             }
