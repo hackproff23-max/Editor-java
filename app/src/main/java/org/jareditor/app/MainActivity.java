@@ -477,20 +477,26 @@ public class MainActivity extends Activity {
                 z.close();
                 toast("Salvo!");
             } else if (req == REQ_IMPORT && importPv != null) {
+                // resolucao original (ate 4096 px no lado maior; reduz so se faltar memoria)
                 BitmapFactory.Options o = new BitmapFactory.Options();
                 o.inScaled = false;
                 o.inJustDecodeBounds = true;
                 InputStream i1 = getContentResolver().openInputStream(u);
                 try { BitmapFactory.decodeStream(i1, null, o); } finally { i1.close(); }
                 int ss = 1;
-                while (o.outWidth / ss > 2048 || o.outHeight / ss > 2048) ss *= 2;
-                o.inJustDecodeBounds = false;
-                o.inSampleSize = ss;
-                InputStream i2 = getContentResolver().openInputStream(u);
-                Bitmap ib;
-                try { ib = BitmapFactory.decodeStream(i2, null, o); } finally { i2.close(); }
+                while (Math.max(o.outWidth, o.outHeight) / ss > 4096) ss *= 2;
+                Bitmap ib = null;
+                while (ib == null && ss <= 64) {
+                    o.inJustDecodeBounds = false;
+                    o.inSampleSize = ss;
+                    InputStream i2 = getContentResolver().openInputStream(u);
+                    try { ib = BitmapFactory.decodeStream(i2, null, o); }
+                    catch (OutOfMemoryError oom) { ib = null; ss *= 2; }
+                    finally { i2.close(); }
+                    if (ib == null && o.outWidth <= 0) break;
+                }
                 if (ib == null) toast("Não consegui abrir essa imagem");
-                else { importPv.beginOverlay(ib); toast("Arraste a PNG para posicionar e toque em ✓ Aplicar"); }
+                else { importPv.setReference(ib); toast("Referência carregada. Arraste para posicionar; Mover desliga para desenhar"); }
             } else if (req == REQ_REPLACE && replaceTarget != null) {
                 InputStream is = getContentResolver().openInputStream(u);
                 byte[] nb;
@@ -757,17 +763,45 @@ public class MainActivity extends Activity {
         Button[] r3b = { bg, br, bf, bu, bz1, bz2 };
         for (Button x : r3b) r3.addView(x, new LinearLayout.LayoutParams(0, -2, 1));
         box.addView(r3);
-        final LinearLayout ovBar = new LinearLayout(this);
-        Button ovOk = mk("✓ Aplicar"), ovNo = mk("✕ Cancelar"), ovMenos = mk("Tam −"), ovMais = mk("Tam +");
-        ovOk.setOnClickListener(v -> pv.commitOverlay());
-        ovNo.setOnClickListener(v -> pv.cancelOverlay());
-        ovMenos.setOnClickListener(v -> pv.overlaySize(0.9f));
-        ovMais.setOnClickListener(v -> pv.overlaySize(1.1f));
-        Button[] ovb = { ovOk, ovNo, ovMenos, ovMais };
-        for (Button x : ovb) ovBar.addView(x, new LinearLayout.LayoutParams(0, -2, 1));
-        ovBar.setVisibility(View.GONE);
-        pv.onOverlay = () -> ovBar.setVisibility(pv.ovActive ? View.VISIBLE : View.GONE);
-        box.addView(ovBar);
+        // barra da PNG de referencia (so aparece enquanto ha uma referencia)
+        final LinearLayout refBar = new LinearLayout(this);
+        refBar.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout rb1 = new LinearLayout(this);
+        final Button rMove = mk("Mover ✓"), rMenos = mk("Tam −"), rMais = mk("Tam +"), rAbove = mk("Abaixo"),
+            rPaste = mk("Colar"), rDel = mk("Tirar");
+        rMove.setOnClickListener(v -> pv.setRefMove(!pv.refMove));
+        rMenos.setOnClickListener(v -> pv.refSize(0.9f));
+        rMais.setOnClickListener(v -> pv.refSize(1.1f));
+        rAbove.setOnClickListener(v -> pv.setRefAbove(!pv.refAbove));
+        rPaste.setOnClickListener(v -> toast(pv.pasteRef() ? "Colada no desenho (pode desfazer)" : "Tamanho fora do limite"));
+        rDel.setOnClickListener(v -> pv.removeRef());
+        Button[] rbs = { rMove, rMenos, rMais, rAbove, rPaste, rDel };
+        for (Button x : rbs) rb1.addView(x, new LinearLayout.LayoutParams(0, -2, 1));
+        refBar.addView(rb1);
+        LinearLayout rb2 = new LinearLayout(this);
+        rb2.setGravity(Gravity.CENTER_VERTICAL);
+        final TextView rTv = new TextView(this);
+        rTv.setTextSize(11);
+        rTv.setText("Opacidade 50%");
+        SeekBar rSb = new SeekBar(this);
+        rSb.setMax(100);
+        rSb.setProgress(50);
+        rSb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar bar, int p, boolean user) { pv.setRefAlpha(p); rTv.setText("Opacidade " + p + "%"); }
+            public void onStartTrackingTouch(SeekBar bar) {}
+            public void onStopTrackingTouch(SeekBar bar) {}
+        });
+        rb2.addView(rTv, new LinearLayout.LayoutParams(dp(100), -2));
+        rb2.addView(rSb, new LinearLayout.LayoutParams(0, -2, 1));
+        refBar.addView(rb2);
+        refBar.setVisibility(View.GONE);
+        pv.onRef = () -> {
+            refBar.setVisibility(pv.ref != null ? View.VISIBLE : View.GONE);
+            rMove.setText(pv.refMove ? "Mover ✓" : "Mover");
+            rAbove.setText(pv.refAbove ? "Acima" : "Abaixo");
+        };
+        pv.setRefAlpha(50);
+        box.addView(refBar);
         box.addView(pv, new LinearLayout.LayoutParams(-1, 0, 1));
 
         String tag = s.kind == 1 ? " (PNG embutido)" : s.kind == 2 ? " (RAW)" : "";
@@ -775,7 +809,6 @@ public class MainActivity extends Activity {
             .setPositiveButton("Salvar", (dd, w) -> {
                 try {
                     byte[] out;
-                    pv.commitOverlay();
                     if (s.kind == 2) out = encodeRaw(pv.bmp, files.get(name), s.off, s.fmt);
                     else {
                         byte[] img = encImg(pv.bmp, type);

@@ -21,11 +21,13 @@ public class PixelView extends View {
     final ArrayList<Bitmap> undo = new ArrayList<>();
     final ScaleGestureDetector sg;
 
-    // ---- PNG importada (camada flutuante, encaixada na grade de pixels) ----
-    public boolean ovActive;
-    public Runnable onOverlay;
-    Bitmap ovSrc, ov;
-    int ovX, ovY, gx, gy;
+    // ---- PNG de referencia (HD, tipo mapa): nao altera o desenho ----
+    public Bitmap ref;
+    public boolean refMove = true, refAbove = false;
+    public int refAlpha = 128; // 0..255
+    public Runnable onRef;
+    float refX, refY, refS = 1, rlx, rly;
+    final Paint rp = new Paint();
 
     public PixelView(Context c, Bitmap b) {
         super(c);
@@ -35,6 +37,7 @@ public class PixelView extends View {
         op.setStyle(Paint.Style.STROKE);
         op.setColor(0xFFFFFF00);
         op.setStrokeWidth(3);
+        rp.setFilterBitmap(true); rp.setDither(true); rp.setAntiAlias(false);
         Bitmap ck = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888);
         Canvas cc = new Canvas(ck);
         cc.drawColor(0xFFBBBBBB);
@@ -69,20 +72,13 @@ public class PixelView extends View {
         int bw = bmp.getWidth(), bh = bmp.getHeight();
         c.drawColor(0xFF303030);
         c.drawRect(tx, ty, tx + bw * scale, ty + bh * scale, cp);
+        if (ref != null && !refAbove) drawRef(c);
         c.save();
         c.translate(tx, ty);
         c.scale(scale, scale);
         c.drawBitmap(bmp, 0, 0, p);
         c.restore();
-        if (ovActive && ov != null) {
-            c.save();
-            c.translate(tx, ty);
-            c.scale(scale, scale);
-            c.drawBitmap(ov, ovX, ovY, p);
-            c.restore();
-            c.drawRect(tx + ovX * scale, ty + ovY * scale,
-                tx + (ovX + ov.getWidth()) * scale, ty + (ovY + ov.getHeight()) * scale, op);
-        }
+        if (ref != null && refAbove) drawRef(c);
         if (grid && scale >= 6) {
             int x0 = Math.max(0, (int) Math.floor(-tx / scale));
             int x1 = Math.min(bw, (int) Math.ceil((getWidth() - tx) / scale));
@@ -112,7 +108,6 @@ public class PixelView extends View {
     }
 
     public void undo() {
-        if (ovActive) { endOverlay(); return; }
         if (undo.isEmpty()) return;
         Bitmap b = undo.remove(undo.size() - 1);
         boolean diff = b.getWidth() != bmp.getWidth() || b.getHeight() != bmp.getHeight();
@@ -127,57 +122,82 @@ public class PixelView extends View {
         invalidate();
     }
 
-    // ---------- importar PNG: camada flutuante presa a grade de pixels ----------
-    public void beginOverlay(Bitmap src) {
-        ovSrc = src;
-        int bw = bmp.getWidth(), bh = bmp.getHeight();
-        int w = src.getWidth(), h = src.getHeight();
-        if (w > bw || h > bh) {
-            float r = Math.min(bw / (float) w, bh / (float) h);
-            w = Math.max(1, Math.round(w * r));
-            h = Math.max(1, Math.round(h * r));
+    // ---------- PNG de referencia ----------
+    // Guarda a imagem em resolucao original; so a exibicao e reduzida (com filtro), entao
+    // da para diminuir e dar zoom sem perder qualidade. O desenho de baixo nao e alterado.
+    void drawRef(Canvas c) {
+        rp.setAlpha(refAlpha);
+        c.save();
+        c.translate(tx, ty);
+        c.scale(scale, scale);
+        c.translate(refX, refY);
+        c.scale(refS, refS);
+        c.drawBitmap(ref, 0, 0, rp);
+        c.restore();
+        if (refMove) {
+            c.drawRect(tx + refX * scale, ty + refY * scale,
+                tx + (refX + ref.getWidth() * refS) * scale, ty + (refY + ref.getHeight() * refS) * scale, op);
         }
-        makeOv(w, h);
-        ovX = (bw - ov.getWidth()) / 2;
-        ovY = (bh - ov.getHeight()) / 2;
-        ovActive = true;
-        if (onOverlay != null) onOverlay.run();
+    }
+
+    public void setReference(Bitmap src) {
+        try { src.setHasMipMap(true); } catch (Throwable ignored) { }
+        ref = src;
+        int bw = bmp.getWidth(), bh = bmp.getHeight();
+        refS = Math.min(bw / (float) src.getWidth(), bh / (float) src.getHeight());
+        refX = (bw - src.getWidth() * refS) / 2f;
+        refY = (bh - src.getHeight() * refS) / 2f;
+        refMove = true;
+        if (onRef != null) onRef.run();
         invalidate();
     }
 
-    void makeOv(int w, int h) {
-        if (w == ovSrc.getWidth() && h == ovSrc.getHeight()) ov = ovSrc;
-        else ov = Bitmap.createScaledBitmap(ovSrc, w, h, false); // sem suavizar: pixels nitidos
-    }
-
-    public void overlaySize(float f) {
-        if (!ovActive || ov == null) return;
-        int w = ov.getWidth(), h = ov.getHeight();
-        int nw = Math.round(w * f);
-        if (nw == w) nw = w + (f > 1 ? 1 : -1);
-        nw = Math.max(1, nw);
-        int nh = Math.max(1, Math.round(nw * (float) ovSrc.getHeight() / ovSrc.getWidth()));
-        if (nw > 4096 || nh > 4096) return;
-        ovX += (w - nw) / 2;
-        ovY += (h - nh) / 2;
-        makeOv(nw, nh);
+    // f > 1 aumenta, f < 1 diminui, em torno do centro da imagem
+    public void refSize(float f) {
+        if (ref == null) return;
+        float w = ref.getWidth() * refS, h = ref.getHeight() * refS;
+        float ns = Math.max(0.005f, Math.min(64f, refS * f));
+        float nw = ref.getWidth() * ns, nh = ref.getHeight() * ns;
+        refX += (w - nw) / 2f;
+        refY += (h - nh) / 2f;
+        refS = ns;
         invalidate();
     }
 
-    public void commitOverlay() {
-        if (!ovActive || ov == null) return;
+    public void setRefAlpha(int pct) {
+        refAlpha = Math.max(0, Math.min(255, pct * 255 / 100));
+        invalidate();
+    }
+
+    public void setRefMove(boolean on) {
+        refMove = on;
+        if (onRef != null) onRef.run();
+        invalidate();
+    }
+
+    public void setRefAbove(boolean on) {
+        refAbove = on;
+        if (onRef != null) onRef.run();
+        invalidate();
+    }
+
+    // Cola a referencia no desenho, pixelada (sem suavizar), na posicao e tamanho atuais
+    public boolean pasteRef() {
+        if (ref == null) return false;
+        int w = Math.round(ref.getWidth() * refS), h = Math.round(ref.getHeight() * refS);
+        if (w < 1 || h < 1 || w > 4096 || h > 4096) return false;
         pushUndo();
-        new Canvas(bmp).drawBitmap(ov, ovX, ovY, p);
-        endOverlay();
+        Bitmap px = Bitmap.createScaledBitmap(ref, w, h, false);
+        Paint pp = new Paint();
+        pp.setAlpha(refAlpha);
+        new Canvas(bmp).drawBitmap(px, Math.round(refX), Math.round(refY), pp);
+        invalidate();
+        return true;
     }
 
-    public void cancelOverlay() { endOverlay(); }
-
-    void endOverlay() {
-        ovActive = false;
-        ov = null;
-        ovSrc = null;
-        if (onOverlay != null) onOverlay.run();
+    public void removeRef() {
+        ref = null;
+        if (onRef != null) onRef.run();
         invalidate();
     }
 
@@ -325,10 +345,14 @@ public class PixelView extends View {
             return true;
         }
         float x = e.getX(), y = e.getY();
-        if (ovActive) {
-            int qx = (int) Math.floor((x - tx) / scale), qy = (int) Math.floor((y - ty) / scale);
-            if (a == MotionEvent.ACTION_DOWN) { gx = qx - ovX; gy = qy - ovY; }
-            else if (a == MotionEvent.ACTION_MOVE) { ovX = qx - gx; ovY = qy - gy; invalidate(); }
+        if (ref != null && refMove) {
+            // arrastar a referencia (movimento livre, sem prender na grade)
+            if (a == MotionEvent.ACTION_DOWN) { rlx = x; rly = y; }
+            else if (a == MotionEvent.ACTION_MOVE) {
+                refX += (x - rlx) / scale; refY += (y - rly) / scale;
+                rlx = x; rly = y;
+                invalidate();
+            }
             return true;
         }
         if (tool == 4) {
