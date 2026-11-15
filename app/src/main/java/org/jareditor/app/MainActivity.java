@@ -21,6 +21,7 @@ import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.charset.*;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.*;
 
 public class MainActivity extends Activity {
@@ -36,6 +37,14 @@ public class MainActivity extends Activity {
 
     static class Src { int kind, off, len, w, h, fmt; } // kind 0 arquivo, 1 PNG embutido, 2 RAW
 
+    // Resultado do teste de abrir o arquivo como imagem.
+    // type != null  -> o arquivo inteiro abriu como imagem (png, jpg, gif, bmp, webp...)
+    // embedded > 0  -> não abriu inteiro, mas tem PNG(s) dentro (comum em pacotes de texturas)
+    // nenhum dos dois -> não é imagem
+    static class Scan { String type; int w, h, embedded; boolean isImage() { return type != null || embedded > 0; } }
+
+    final ConcurrentHashMap<String, Scan> scan = new ConcurrentHashMap<>();
+    volatile boolean cancelScan;
     final LinkedHashMap<String, byte[]> files = new LinkedHashMap<>();
     final ArrayList<String> shown = new ArrayList<>();
     ArrayAdapter<String> adapter;
@@ -54,7 +63,10 @@ public class MainActivity extends Activity {
         Button save = new Button(this); save.setText("Salvar .jar");
         row.addView(open, new LinearLayout.LayoutParams(0, -2, 1));
         row.addView(save, new LinearLayout.LayoutParams(0, -2, 1));
+        Button scanBtn = new Button(this); scanBtn.setText("Escanear");
+        row.addView(scanBtn, new LinearLayout.LayoutParams(0, -2, 1));
         root.addView(row);
+        scanBtn.setOnClickListener(v -> scanAll());
         filter = new EditText(this);
         filter.setHint("Filtrar (ex: png, menu, .txt)");
         filter.setSingleLine(true);
@@ -71,8 +83,18 @@ public class MainActivity extends Activity {
                 TextView t = (TextView) super.getView(pos, cv, parent);
                 String n = shown.get(pos);
                 byte[] data = files.get(n);
-                String ty = imgType(data);
-                t.setText((ty != null ? "[IMG " + ty.toUpperCase() + "] " : "") + n + "  (" + data.length + " B)");
+                Scan sc = scan.get(n);
+                String tag = "";
+                int color = Color.BLACK;
+                if (sc != null && sc.type != null) {
+                    tag = "[IMG " + sc.type.toUpperCase() + " " + sc.w + "x" + sc.h + "] ";
+                    color = Color.rgb(0, 120, 0);
+                } else if (sc != null && sc.embedded > 0) {
+                    tag = "[PNG embutido x" + sc.embedded + "] ";
+                    color = Color.rgb(0, 80, 170);
+                }
+                t.setTextColor(color);
+                t.setText(tag + n + "  (" + data.length + " B)");
                 return t;
             }
         };
@@ -107,28 +129,128 @@ public class MainActivity extends Activity {
     int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density); }
     void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
 
-    // ---------- detecção de formato pelo conteúdo ----------
-    static String imgType(byte[] d) {
-        if (d == null || d.length < 12) return null;
-        if ((d[0] & 255) == 0x89 && d[1] == 'P' && d[2] == 'N' && d[3] == 'G') return "png";
-        if ((d[0] & 255) == 0xFF && (d[1] & 255) == 0xD8 && (d[2] & 255) == 0xFF) return "jpg";
-        if (d[0] == 'G' && d[1] == 'I' && d[2] == 'F' && d[3] == '8') return "gif";
-        if (d.length > 30 && d[0] == 'B' && d[1] == 'M' && d[6] == 0 && d[7] == 0 && d[8] == 0 && d[9] == 0) return "bmp";
-        if (d[0] == 'R' && d[1] == 'I' && d[2] == 'F' && d[3] == 'F' && d[8] == 'W' && d[9] == 'E' && d[10] == 'B' && d[11] == 'P') return "webp";
-        return null;
+    // ---------- scanner: tenta ABRIR cada arquivo como imagem ----------
+    static String extFromMime(String mime) {
+        if (mime == null) return "img";
+        String m = mime.toLowerCase();
+        if (m.contains("png")) return "png";
+        if (m.contains("jpeg") || m.contains("jpg")) return "jpg";
+        if (m.contains("gif")) return "gif";
+        if (m.contains("bmp")) return "bmp";
+        if (m.contains("webp")) return "webp";
+        if (m.contains("heif") || m.contains("heic")) return "heif";
+        int i = m.indexOf('/');
+        return i >= 0 && i + 1 < m.length() ? m.substring(i + 1) : "img";
+    }
+
+    // Testa um arquivo: 1) o arquivo inteiro abre como imagem? 2) tem PNG embutido?
+    static Scan probe(byte[] d) {
+        Scan s = new Scan();
+        if (d == null || d.length < 8) return s;
+        try {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(d, 0, d.length, o);
+            if (o.outWidth > 0 && o.outHeight > 0) {
+                boolean ok = true;
+                // confirma de verdade: decodifica os pixels (o cabeçalho sozinho pode enganar)
+                if ((long) o.outWidth * o.outHeight <= 4000000L) {
+                    Bitmap b = BitmapFactory.decodeByteArray(d, 0, d.length);
+                    ok = b != null;
+                    if (b != null) b.recycle();
+                }
+                if (ok) {
+                    s.type = extFromMime(o.outMimeType);
+                    s.w = o.outWidth;
+                    s.h = o.outHeight;
+                    return s;
+                }
+            }
+        } catch (Throwable t) { /* sem memória ou dados inválidos: segue para o teste de PNG embutido */ }
+        s.embedded = findPng(d, 1000).size();
+        return s;
+    }
+
+    // Procura PNGs dentro de um arquivo qualquer. Retorna {offset, tamanho}.
+    static ArrayList<int[]> findPng(byte[] data, int max) {
+        ArrayList<int[]> found = new ArrayList<>();
+        byte[] sig = { (byte) 0x89, 'P', 'N', 'G', 13, 10, 26, 10 };
+        for (int i = 0; i + 8 <= data.length && found.size() < max; i++) {
+            if (data[i] != sig[0]) continue;
+            boolean m = true;
+            for (int k = 1; k < 8; k++) if (data[i + k] != sig[k]) { m = false; break; }
+            if (!m) continue;
+            int end = -1;
+            for (int j = i + 8; j + 8 <= data.length; j++) {
+                if (data[j] == 'I' && data[j + 1] == 'E' && data[j + 2] == 'N' && data[j + 3] == 'D') { end = j + 8; break; }
+            }
+            if (end > 0) { found.add(new int[] { i, end - i }); i = end - 1; }
+        }
+        return found;
+    }
+
+    // Guarda o arquivo e refaz o teste só dele
+    void put(String name, byte[] data) {
+        files.put(name, data);
+        scan.put(name, probe(data));
+    }
+
+    // Escaneia todos os arquivos do jar em segundo plano, com progresso e botão cancelar
+    void scanAll() {
+        if (files.isEmpty()) { toast("Abra um .jar primeiro"); return; }
+        final ArrayList<String> names = new ArrayList<>(files.keySet());
+        final int total = names.size();
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        l.setPadding(dp(16), dp(12), dp(16), 0);
+        final TextView tv = new TextView(this);
+        tv.setText("0/" + total);
+        final ProgressBar pb = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        pb.setMax(total);
+        l.addView(tv);
+        l.addView(pb);
+        cancelScan = false;
+        final AlertDialog dlg = new AlertDialog.Builder(this).setTitle("Testando cada arquivo como imagem").setView(l)
+            .setCancelable(false).setNegativeButton("Cancelar", (d, w) -> cancelScan = true).create();
+        dlg.show();
+        new Thread(() -> {
+            final int[] cnt = { 0, 0, 0 }; // imagens inteiras, com PNG embutido, não-imagens
+            int done = 0;
+            for (final String n : names) {
+                if (cancelScan) break;
+                Scan s = probe(files.get(n));
+                scan.put(n, s);
+                if (s.type != null) cnt[0]++; else if (s.embedded > 0) cnt[1]++; else cnt[2]++;
+                done++;
+                if (done % 4 == 0 || done == total) {
+                    final int dn = done;
+                    runOnUiThread(() -> { pb.setProgress(dn); tv.setText(dn + "/" + total + "  " + n); });
+                }
+            }
+            final boolean cancelled = cancelScan;
+            runOnUiThread(() -> {
+                try { dlg.dismiss(); } catch (Exception e) {}
+                refresh();
+                toast((cancelled ? "Cancelado. " : "") + cnt[0] + " imagens, " + cnt[1] + " com PNG embutido, " + cnt[2] + " não são imagem");
+            });
+        }).start();
     }
 
     void refresh() {
         String f = filter.getText().toString().toLowerCase();
         shown.clear();
+        int img = 0, emb = 0;
         for (Map.Entry<String, byte[]> en : files.entrySet()) {
             String n = en.getKey();
+            Scan s = scan.get(n);
+            if (s != null && s.type != null) img++; else if (s != null && s.embedded > 0) emb++;
             if (!f.isEmpty() && !n.toLowerCase().contains(f)) continue;
-            if (onlyImg.isChecked() && imgType(en.getValue()) == null) continue;
+            if (onlyImg.isChecked() && (s == null || !s.isImage())) continue;
             shown.add(n);
         }
         adapter.notifyDataSetChanged();
-        info.setText(jarName + ": " + shown.size() + " de " + files.size() + " (toque = editar, segurar = opções)");
+        info.setText(jarName + ": " + shown.size() + " de " + files.size() + " | " + img + " imagens, " + emb
+            + " com PNG embutido (toque = editar, segurar = opções)");
     }
 
     byte[] readAll(InputStream in) throws IOException {
@@ -157,6 +279,7 @@ public class MainActivity extends Activity {
             if (req == REQ_OPEN) {
                 jarName = displayName(u);
                 files.clear();
+                scan.clear();
                 ZipInputStream z = new ZipInputStream(getContentResolver().openInputStream(u));
                 ZipEntry e;
                 while ((e = z.getNextEntry()) != null) {
@@ -165,6 +288,7 @@ public class MainActivity extends Activity {
                 z.close();
                 filter.setText("");
                 refresh();
+                scanAll(); // testa cada arquivo como imagem assim que o jar abre
             } else if (req == REQ_SAVE) {
                 ZipOutputStream z = new ZipOutputStream(new BufferedOutputStream(getContentResolver().openOutputStream(u)));
                 for (Map.Entry<String, byte[]> en : files.entrySet()) {
@@ -175,7 +299,7 @@ public class MainActivity extends Activity {
                 z.close();
                 toast("Salvo!");
             } else if (req == REQ_REPLACE && replaceTarget != null) {
-                files.put(replaceTarget, readAll(getContentResolver().openInputStream(u)));
+                put(replaceTarget, readAll(getContentResolver().openInputStream(u)));
                 refresh();
                 toast("Substituído");
             }
@@ -187,9 +311,12 @@ public class MainActivity extends Activity {
     // ---------- abrir arquivos ----------
     void edit(String name) {
         byte[] data = files.get(name);
-        if (imgType(data) != null) { openImage(name, new Src()); return; }
+        Scan s = scan.get(name);
+        if (s == null) { s = probe(data); scan.put(name, s); }
+        if (s.type != null) { openImage(name, new Src()); return; }
         String l = name.toLowerCase();
         for (String ext : TEXT_EXT.split(" ")) if (l.endsWith(ext)) { editText(name); return; }
+        if (s.embedded > 0) { scanEmbedded(name); return; }
         options(name);
     }
 
@@ -232,7 +359,7 @@ public class MainActivity extends Activity {
         et.setTextSize(13);
         new AlertDialog.Builder(this).setTitle(name + " [" + cs + "]").setView(et)
             .setPositiveButton("Aplicar", (dd, w) -> {
-                try { files.put(name, et.getText().toString().getBytes(charset)); }
+                try { put(name, et.getText().toString().getBytes(charset)); }
                 catch (Exception ex) { toast("Erro ao codificar"); }
             }).setNegativeButton("Cancelar", null).show();
     }
@@ -240,18 +367,7 @@ public class MainActivity extends Activity {
     // ---------- imagens: arquivo, PNG embutido, RAW ----------
     void scanEmbedded(final String name) {
         final byte[] data = files.get(name);
-        final ArrayList<int[]> found = new ArrayList<>();
-        byte[] sig = { (byte) 0x89, 'P', 'N', 'G', 13, 10, 26, 10 };
-        for (int i = 0; i + 8 <= data.length && found.size() < 100; i++) {
-            boolean m = true;
-            for (int k = 0; k < 8; k++) if (data[i + k] != sig[k]) { m = false; break; }
-            if (!m) continue;
-            int end = -1;
-            for (int j = i + 8; j + 8 <= data.length; j++) {
-                if (data[j] == 'I' && data[j + 1] == 'E' && data[j + 2] == 'N' && data[j + 3] == 'D') { end = j + 8; break; }
-            }
-            if (end > 0) { found.add(new int[] { i, end - i }); i = end - 1; }
-        }
+        final ArrayList<int[]> found = findPng(data, 300);
         if (found.isEmpty()) { toast("Nenhum PNG embutido encontrado"); return; }
         String[] items = new String[found.size()];
         for (int i = 0; i < items.length; i++) items[i] = "PNG #" + (i + 1) + "  @" + found.get(i)[0] + "  (" + found.get(i)[1] + " B)";
@@ -351,7 +467,8 @@ public class MainActivity extends Activity {
             else bm = decodeRaw(data, s.off, s.w, s.h, s.fmt);
         } catch (Exception e) {}
         if (bm == null) { toast("Não reconheci como imagem. Tente PNG embutido ou RAW (segure o arquivo)."); return; }
-        editImage(name, s, bm, s.kind == 0 ? imgType(data) : "png");
+        Scan sc = scan.get(name);
+        editImage(name, s, bm, s.kind == 0 && sc != null && sc.type != null ? sc.type : "png");
     }
 
     byte[] encImg(Bitmap b, String type) {
@@ -453,7 +570,7 @@ public class MainActivity extends Activity {
                             System.arraycopy(old, s.off + s.len, out, s.off + img.length, old.length - s.off - s.len);
                         } else out = img;
                     }
-                    files.put(name, out);
+                    put(name, out);
                     refresh();
                     toast("Imagem atualizada");
                 } catch (Exception ex) { toast("Erro ao salvar: " + ex.getMessage()); }

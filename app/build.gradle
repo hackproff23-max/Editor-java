@@ -1,4 +1,13 @@
 plugins { id 'com.android.application' }
+
+// Assinatura do app: a chave fica em app/keystore.b64 (texto base64) e vira app/release.jks no build.
+// Assim todo APK gerado (local ou no GitHub Actions) sai com a MESMA assinatura e instala por cima do anterior.
+def ksFile = file('release.jks')
+def ksText = file('keystore.b64')
+if (!ksFile.exists() && ksText.exists()) {
+    ksFile.bytes = java.util.Base64.getDecoder().decode(ksText.text.trim())
+}
+
 android {
     namespace 'org.jareditor.app'
     compileSdk 34
@@ -12,5 +21,20 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
+    }
+    signingConfigs {
+        app {
+            storeFile ksFile
+            storePassword 'editorjava123'
+            keyAlias 'editorjava'
+            keyPassword 'editorjava123'
+        }
+    }
+    buildTypes {
+        debug { signingConfig signingConfigs.app }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.app
+        }
     }
 }
