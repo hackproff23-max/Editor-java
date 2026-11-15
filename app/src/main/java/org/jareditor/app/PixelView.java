@@ -147,7 +147,7 @@ public class PixelView extends View {
         refS = Math.min(bw / (float) src.getWidth(), bh / (float) src.getHeight());
         refX = (bw - src.getWidth() * refS) / 2f;
         refY = (bh - src.getHeight() * refS) / 2f;
-        refMove = true;
+        refMove = false; // por padrao so desenha por cima; ligue Mover para reposicionar
         if (onRef != null) onRef.run();
         invalidate();
     }

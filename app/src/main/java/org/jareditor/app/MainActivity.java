@@ -496,7 +496,7 @@ public class MainActivity extends Activity {
                     if (ib == null && o.outWidth <= 0) break;
                 }
                 if (ib == null) toast("Não consegui abrir essa imagem");
-                else { importPv.setReference(ib); toast("Referência carregada. Arraste para posicionar; Mover desliga para desenhar"); }
+                else { importPv.setReference(ib); toast("Referência carregada. Desenhe por cima; toque em Mover para reposicionar a imagem"); }
             } else if (req == REQ_REPLACE && replaceTarget != null) {
                 InputStream is = getContentResolver().openInputStream(u);
                 byte[] nb;
