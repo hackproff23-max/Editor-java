@@ -716,7 +716,7 @@ public class MainActivity extends Activity {
                 } catch (Exception ex) { toast("Cor inválida"); }
             }).setNegativeButton("Cancelar", null).show();
         });
-        pal.addView(hex);
+        pal.addView(hex); View.OnClickListener pkl = v -> ColorPicker.show(this, pv.color, c -> { pv.color = c; cur.setBackgroundColor(c); }); Button pk = mk("Paleta"); pk.setOnClickListener(pkl); cur.setOnClickListener(pkl); pal.addView(pk, 1);
         hs.addView(pal);
         box.addView(hs);
         pv.onPick = () -> cur.setBackgroundColor(pv.color);
