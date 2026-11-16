@@ -14,6 +14,9 @@ public class PixelView extends View {
     public boolean grid = true;
     public Runnable onPick;
     public Info info;
+    public boolean onlyOn, pickOnly;
+    public int onlyColor;
+    public Runnable onOnly;
     float scale = 1, tx, ty, mx, my, pmx, pmy;
     boolean fitted, stroke, moved, multi;
     int lx, ly;
@@ -307,6 +310,20 @@ public class PixelView extends View {
         return true;
     }
 
+    public int replaceAll(int from, int to) {
+        if (from == to) return 0;
+        int w = bmp.getWidth(), h = bmp.getHeight();
+        int[] a = new int[w * h];
+        bmp.getPixels(a, 0, w, 0, 0, w, h);
+        int n = 0;
+        for (int i = 0; i < a.length; i++) if (a[i] == from) { a[i] = to; n++; }
+        if (n == 0) return 0;
+        pushUndo();
+        bmp.setPixels(a, 0, w, 0, 0, w, h);
+        invalidate();
+        return n;
+    }
+
     boolean in(int x, int y) { return x >= 0 && y >= 0 && x < bmp.getWidth() && y < bmp.getHeight(); }
 
     void apply(int x, int y) {
@@ -315,7 +332,7 @@ public class PixelView extends View {
             for (int j = 0; j < brush; j++)
                 for (int i = 0; i < brush; i++) {
                     int xx = x - o + i, yy = y - o + j;
-                    if (in(xx, yy)) bmp.setPixel(xx, yy, tool == 0 ? color : 0);
+                    if (in(xx, yy) && (!onlyOn || bmp.getPixel(xx, yy) == onlyColor)) bmp.setPixel(xx, yy, tool == 0 ? color : 0);
                 }
             return;
         }
@@ -341,7 +358,7 @@ public class PixelView extends View {
         int[] a = new int[w * h];
         bmp.getPixels(a, 0, w, 0, 0, w, h);
         int target = a[sy * w + sx];
-        if (target == color) return;
+        if (target == color || (onlyOn && target != onlyColor)) return;
         int[] st = new int[w * h];
         int sp = 0;
         a[sy * w + sx] = color;
@@ -392,6 +409,16 @@ public class PixelView extends View {
             return true;
         }
         float x = e.getX(), y = e.getY();
+        if (pickOnly) {
+            if (a == MotionEvent.ACTION_DOWN) {
+                int qx = (int) Math.floor((x - tx) / scale), qy = (int) Math.floor((y - ty) / scale);
+                if (in(qx, qy)) { onlyColor = bmp.getPixel(qx, qy); onlyOn = true; }
+                pickOnly = false;
+                if (onOnly != null) onOnly.run();
+                invalidate();
+            }
+            return true;
+        }
         if (ref != null && refMove) {
             // arrastar a referencia (movimento livre, sem prender na grade); durante o arrasto mostra o HD (leve)
             if (a == MotionEvent.ACTION_DOWN) { rlx = x; rly = y; refDrag = true; }

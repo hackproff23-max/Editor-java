@@ -784,6 +784,24 @@ public class MainActivity extends Activity {
         Button[] r3b = { bg, br, bf, bu, bz1, bz2 };
         for (Button x : r3b) r3.addView(x, new LinearLayout.LayoutParams(0, -2, 1));
         box.addView(r3);
+        LinearLayout r4 = new LinearLayout(this);
+        final View onlySw = new View(this);
+        final Button bo = mk("Só na cor"), bt = mk("Trocar tudo");
+        pv.onOnly = () -> {
+            onlySw.setBackgroundColor(pv.onlyOn ? pv.onlyColor : 0x33888888);
+            bo.setText(pv.pickOnly ? "Toque na cor…" : pv.onlyOn ? "Só na cor ✓" : "Só na cor");
+        };
+        pv.onOnly.run();
+        bo.setOnClickListener(v -> onlyColorMenu(pv));
+        bt.setOnClickListener(v -> {
+            if (!pv.onlyOn) { toast("Escolha primeiro a cor em Só na cor"); return; }
+            int n = pv.replaceAll(pv.onlyColor, pv.color);
+            toast(n > 0 ? n + " pixel(s) trocado(s) (pode desfazer)" : "Nada para trocar");
+        });
+        r4.addView(onlySw, new LinearLayout.LayoutParams(dp(40), dp(40)));
+        r4.addView(bo, new LinearLayout.LayoutParams(0, -2, 1));
+        r4.addView(bt, new LinearLayout.LayoutParams(0, -2, 1));
+        box.addView(r4);
         // barra da PNG de referencia (so aparece enquanto ha uma referencia)
         final LinearLayout refBar = new LinearLayout(this);
         refBar.setOrientation(LinearLayout.VERTICAL);
@@ -857,6 +875,16 @@ public class MainActivity extends Activity {
         dlg.setCanceledOnTouchOutside(false);
         dlg.show();
         dlg.getWindow().setLayout(-1, -1);
+    }
+
+    void onlyColorMenu(final PixelView pv) {
+        String[] it = { "Pegar a cor da imagem (toque)", "Usar a cor atual do pincel", "Desligar" };
+        new AlertDialog.Builder(this).setTitle("Pintar só nesta cor").setItems(it, (d, w) -> {
+            if (w == 0) { pv.pickOnly = true; toast("Toque na imagem na cor que quer isolar"); }
+            else if (w == 1) { pv.onlyColor = pv.color; pv.onlyOn = true; pv.pickOnly = false; }
+            else { pv.onlyOn = false; pv.pickOnly = false; }
+            if (pv.onOnly != null) pv.onOnly.run();
+        }).show();
     }
 
     // ---------- modo foto ----------
